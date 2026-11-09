@@ -50,6 +50,9 @@ regime. The learner should shift weight to `naive`/`holt` over time. Watch this.
 - Accuracy stats on the page include the replayed backtest period until real days replace them (~60 days).
 
 ## Ideas backlog (not started)
+- **Light refresh** (discussed 2026-11-09): at most hourly on page view, re-run only the forecast step from the
+  current live rate using the day's stored weights. Keeps "Tomorrow" fresh without full syncs. Full sync on
+  every visit was rejected (free-tier compute, Wise blocking risk, no accuracy gain).
 - Fallback live rate from cross-check sources when Wise fails.
 - A USD/LKR-specific signal (CBSL publishes rates, but no free stable API was found).
 - Weekday-aware evaluation that skips weekend duplicates.
