@@ -46,8 +46,9 @@ you can see the actual numbers.
 
 1. Push this folder to a GitHub repo.
 2. On vercel.com: **Add New → Project →** import the repo. The defaults are fine.
-3. In the project: **Storage → Create Database → Neon (Postgres, Free)** and connect it to the project.
-   This sets `DATABASE_URL` automatically.
+3. In the project: **Storage → Create Database → Neon (Postgres, Free)**, region **Singapore**, and connect
+   it to the project. This sets `DATABASE_URL` automatically. Functions are pinned to `sin1` in `vercel.json`,
+   so the app and the database sit in the same region.
 4. **Settings → Environment Variables**: add `CRON_SECRET` with any long random string
    (`openssl rand -hex 32`).
 5. Redeploy. Open the site: the first visit kicks off the initial sync (history download plus 90-day
