@@ -1,0 +1,123 @@
+import postgres from "postgres";
+
+type Sql = ReturnType<typeof postgres>;
+
+const globalForDb = globalThis as unknown as { __sql?: Sql; __schemaReady?: Promise<void> };
+
+export function hasDb(): boolean {
+  return Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL);
+}
+
+export function db(): Sql {
+  if (!globalForDb.__sql) {
+    const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    if (!url) throw new Error("DATABASE_URL is not set");
+    const local = /localhost|127\.0\.0\.1/.test(url);
+    globalForDb.__sql = postgres(url, {
+      ssl: local ? false : "require",
+      max: 3,
+      idle_timeout: 20,
+      connect_timeout: 15,
+      prepare: false, // safe with Neon's pooled (pgbouncer) endpoint
+      onnotice: () => {},
+    });
+  }
+  return globalForDb.__sql;
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS rates_history (
+  currency    text NOT NULL,
+  date        date NOT NULL,
+  rate        double precision NOT NULL,
+  source      text NOT NULL DEFAULT 'wise',
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (currency, date)
+);
+
+CREATE TABLE IF NOT EXISTS live_quotes (
+  id          bigserial PRIMARY KEY,
+  currency    text NOT NULL,
+  fetched_at  timestamptz NOT NULL DEFAULT now(),
+  date        date NOT NULL,
+  mid_rate    double precision NOT NULL,
+  providers   jsonb NOT NULL DEFAULT '[]'::jsonb
+);
+CREATE INDEX IF NOT EXISTS live_quotes_cur_time ON live_quotes (currency, fetched_at DESC);
+
+-- External market signals (USD basket from ECB/Frankfurter, cross-check rates, ...)
+CREATE TABLE IF NOT EXISTS market_data (
+  series      text NOT NULL,
+  date        date NOT NULL,
+  value       double precision NOT NULL,
+  PRIMARY KEY (series, date)
+);
+
+-- Every forecast every model makes. model = drift|holt|monthly_pattern|mean_reversion|market|blend|blend_bc|ensemble
+CREATE TABLE IF NOT EXISTS predictions (
+  id            bigserial PRIMARY KEY,
+  currency      text NOT NULL,
+  made_on       date NOT NULL,
+  target_date   date NOT NULL,
+  horizon       int  NOT NULL,
+  model         text NOT NULL,
+  predicted     double precision NOT NULL,
+  lower80       double precision,
+  upper80       double precision,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (currency, made_on, target_date, model)
+);
+CREATE INDEX IF NOT EXISTS predictions_target ON predictions (currency, target_date, model);
+
+-- The "delta" table: how close each prediction was once the real rate is known.
+CREATE TABLE IF NOT EXISTS prediction_errors (
+  prediction_id bigint PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
+  currency      text NOT NULL,
+  model         text NOT NULL,
+  made_on       date NOT NULL,
+  target_date   date NOT NULL,
+  horizon       int  NOT NULL,
+  predicted     double precision NOT NULL,
+  actual        double precision NOT NULL,
+  delta         double precision NOT NULL,      -- actual - predicted
+  pct_error     double precision NOT NULL,      -- (predicted - actual) / actual * 100
+  log_error     double precision NOT NULL,      -- ln(predicted / actual)
+  evaluated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS prediction_errors_lookup ON prediction_errors (currency, model, target_date);
+
+-- Snapshot of what the learner concluded on each run (weights, bias), for transparency.
+CREATE TABLE IF NOT EXISTS model_stats (
+  currency    text NOT NULL,
+  as_of       date NOT NULL,
+  stats       jsonb NOT NULL,
+  PRIMARY KEY (currency, as_of)
+);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+  id          bigserial PRIMARY KEY,
+  started_at  timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz,
+  run_date    date NOT NULL,
+  status      text NOT NULL DEFAULT 'running',
+  message     text
+);
+
+CREATE TABLE IF NOT EXISTS sync_lock (
+  id        int PRIMARY KEY,
+  locked_at timestamptz NOT NULL
+);
+`;
+
+export function ensureSchema(): Promise<void> {
+  if (!globalForDb.__schemaReady) {
+    globalForDb.__schemaReady = db()
+      .unsafe(SCHEMA)
+      .then(() => undefined)
+      .catch((e) => {
+        globalForDb.__schemaReady = undefined;
+        throw e;
+      });
+  }
+  return globalForDb.__schemaReady;
+}
