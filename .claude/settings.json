@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_response.filePath // .tool_input.file_path // empty'); case \"$f\" in *.ts|*.tsx) cd \"${CLAUDE_PROJECT_DIR:-.}\" && npx --no-install eslint --max-warnings=0 \"$f\" 1>&2 || exit 2 ;; esac",
+            "timeout": 60,
+            "statusMessage": "Linting edited file"
+          }
+        ]
+      }
+    ]
+  }
+}

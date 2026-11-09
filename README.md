@@ -70,3 +70,9 @@ npm run dev       # http://localhost:3000
 ```
 
 `GET /api/dashboard` returns everything on the page as JSON.
+
+## Further reading
+- `docs/ARCHITECTURE.md`: data flow, schema, sync pipeline, learning math.
+- `docs/CONTEXT.md`: requirements, decisions, backtest results, known limitations.
+- `AGENTS.md` / `CLAUDE.md`: rules for AI coding agents working on this repo.
+
