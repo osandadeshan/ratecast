@@ -485,3 +485,9 @@ This is **not financial advice**.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): exact learning formulas and internal details.
 - [`docs/CONTEXT.md`](docs/CONTEXT.md): original requirements, design decisions, backtest log, backlog.
 - [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md): rules for AI coding agents working on this repo.
+
+---
+
+## License
+
+Released under the **MIT License**: free to use, modify and share. See [LICENSE](LICENSE).
