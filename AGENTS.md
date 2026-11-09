@@ -50,7 +50,7 @@ lib/predict/                  series helpers, models, learning (weights/bias/sig
 lib/sync.ts                   Orchestration of a sync run, incl. no-lookahead replay of missed days
 lib/dashboard.ts              All read queries for the page
 scripts/sync.ts               CLI wrapper for runSync()
-vercel.json                   Cron: /api/cron/sync at 01:30 UTC (09:30 SGT)
+vercel.json                   Functions in sin1 (Singapore, next to Neon); cron /api/cron/sync at 01:30 UTC (09:30 SGT)
 ```
 
 ## Invariants: do not break these

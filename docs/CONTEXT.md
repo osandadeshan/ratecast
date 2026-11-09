@@ -20,6 +20,7 @@ Background a new contributor (human or AI) needs that isn't obvious from the cod
 |---|---|
 | Next.js 16 App Router on Vercel Hobby | free, cron included, the owner asked for Vercel |
 | Neon Postgres (Vercel Marketplace, free) | free, auto-injects `DATABASE_URL`; postgres.js works locally too |
+| Neon in Singapore + Vercel functions pinned to `sin1` | DB round-trips stay local (sync runs dozens of queries); Wise is called from SG to match `sourceCountry=SG` |
 | One daily cron + `after()` self-heal | Hobby allows daily crons only; a missed run is caught by the next visit |
 | Ensemble of simple models, weights learned from deltas | FX is near-random; transparent and cheap; learns which model works per horizon |
 | Keep `naive` as a model and show it in the UI | the honest baseline; the learner can fall back to it |
