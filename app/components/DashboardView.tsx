@@ -58,7 +58,8 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         </div>
         <div className="lg:col-span-2 space-y-6 min-w-0">
           <ProvidersCard c={c} />
-          <MarketCard c={c} />
+          <MarketCard c={c} macro={data.macro} health={data.events.health.filter((h) => MACRO_SOURCES.has(h.source))} />
+          <EventsCard c={c} events={data.events} />
         </div>
       </div>
       <LearningSection c={c} />
@@ -66,7 +67,8 @@ export default function DashboardView({ data }: { data: Dashboard }) {
       <footer className="text-xs text-ink-3 pb-6 space-y-1">
         <p>
           Rates: Wise (history and comparisons). Cross-checks: ExchangeRate-API, Currency-API. Market signal: ECB
-          reference rates via Frankfurter. Times in Singapore (SGT).
+          reference rates via Frankfurter. Policy calendars: US Federal Reserve, Central Bank of Sri Lanka. Times in
+          Singapore (SGT).
           {data.lastSync && (
             <>
               {" "}
@@ -297,7 +299,15 @@ function ProvidersCard({ c }: { c: CurrencyDashboard }) {
   );
 }
 
-function MarketCard({ c }: { c: CurrencyDashboard }) {
+function MarketCard({
+  c,
+  macro,
+  health,
+}: {
+  c: CurrencyDashboard;
+  macro: Dashboard["macro"];
+  health: Dashboard["events"]["health"];
+}) {
   const m = c.market;
   const d = c.decimals;
   return (
@@ -322,7 +332,38 @@ function MarketCard({ c }: { c: CurrencyDashboard }) {
             </span>
           </dd>
         </div>
+        {macro.map((f) => (
+          <div key={f.series}>
+            <dt className="text-xs text-ink-3">
+              {f.label} <span className="whitespace-nowrap">· {shortDate(f.date)}</span>
+            </dt>
+            <dd className="num font-medium">
+              {f.unit === "pp" ? `${f.value.toFixed(2)}%` : `$${f.value.toFixed(2)}`}{" "}
+              <span className="text-ink-3 font-normal text-xs">
+                {f.change30d == null
+                  ? ""
+                  : f.unit === "pp"
+                    ? `${f.change30d >= 0 ? "+" : ""}${f.change30d.toFixed(2)} pp 30d`
+                    : `${pct(f.change30d)} 30d`}
+              </span>
+            </dd>
+          </div>
+        ))}
       </dl>
+      {macro.length > 0 && (
+        <p className="text-xs text-ink-3 mt-2">
+          Yields and oil feed the &ldquo;US yields + oil&rdquo; model. It stays in shadow (weight 0) until it beats the
+          random walk.
+        </p>
+      )}
+      {health
+        .filter((h) => !h.ok)
+        .map((h) => (
+          <p key={h.source} className="text-xs mt-1" style={{ color: "var(--critical)" }}>
+            {h.label}: not read since {h.lastOkAt ? shortDate(h.lastOkAt.slice(0, 10)) : "setup"}
+            {h.error ? ` (${h.error.slice(0, 80)})` : ""}.
+          </p>
+        ))}
       {m.crossChecks.length > 0 && (
         <div className="mt-4">
           <div className="text-xs text-ink-3 mb-1.5">Cross-check vs other sources</div>
@@ -337,6 +378,101 @@ function MarketCard({ c }: { c: CurrencyDashboard }) {
             ))}
           </ul>
         </div>
+      )}
+    </section>
+  );
+}
+
+/** Health rows that belong to the Market context card rather than Policy events. */
+const MACRO_SOURCES = new Set(["treasury", "fred-brent"]);
+
+const OUTCOME_LABEL: Record<string, string> = {
+  cut: "cut",
+  hold: "hold",
+  hike: "hike",
+  sla: "staff deal",
+  board: "approved",
+};
+
+function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["events"] }) {
+  const stats = c.stats?.events ?? [];
+  const effect = (kind: string) => {
+    const s = stats.find((x) => x.kind === kind);
+    if (!s || s.n < 4) return "not enough past events yet · range unchanged";
+    if (s.ratio < 1.05) return `no bigger moves than usual (${s.n} past) · range unchanged`;
+    return `past moves ≈ ${Math.sqrt(s.ratio).toFixed(1)}× a normal day (${s.n} past) · range widened`;
+  };
+  const mine = events.health.filter((h) => !MACRO_SOURCES.has(h.source));
+  const broken = mine.filter((h) => !h.ok);
+  const notes = mine.filter((h) => h.ok && h.note);
+  return (
+    <section className="card p-4 sm:p-5 min-w-0">
+      <h2 className="text-lg font-semibold">Policy events</h2>
+      <p className="text-xs text-ink-3 mt-0.5 mb-3">
+        Scheduled central-bank decisions, read automatically from the Fed and CBSL. They only widen the 80% range for
+        SGD → {c.target}; the predicted number doesn&apos;t change, because nobody knows the decision in advance.
+      </p>
+      {events.upcoming.length === 0 ? (
+        <p className="text-sm text-ink-3">No scheduled decisions in the next 75 days.</p>
+      ) : (
+        <ul className="space-y-2.5">
+          {events.upcoming.slice(0, 5).map((e) => (
+            <li key={`${e.kind}:${e.date}`} className="min-w-0">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-sm font-medium truncate">{e.label}</span>
+                <span className="num text-sm whitespace-nowrap">
+                  {shortDate(e.date)} <span className="text-ink-3 text-xs">{weekday(e.date)}</span>
+                </span>
+              </div>
+              <div className="text-xs text-ink-3">{effect(e.kind)}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {events.recent.length > 0 && (
+        <div className="mt-4">
+          <div className="text-xs text-ink-3 mb-1.5">Recent</div>
+          <ul className="text-sm space-y-1">
+            {events.recent.slice(0, 4).map((e) => (
+              <li key={`${e.kind}:${e.date}`} className="flex justify-between gap-3 min-w-0">
+                {e.url ? (
+                  <a href={e.url} target="_blank" rel="noopener noreferrer" className="text-ink-2 truncate hover:underline">
+                    {e.kind === "imf" ? e.title : e.label}
+                  </a>
+                ) : (
+                  <span className="text-ink-2 truncate">{e.kind === "imf" ? e.title : e.label}</span>
+                )}
+                <span className="num whitespace-nowrap">
+                  {e.outcome && OUTCOME_LABEL[e.outcome] && (
+                    <span className="mr-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-surface-2 text-ink-2">
+                      {OUTCOME_LABEL[e.outcome]}
+                    </span>
+                  )}
+                  {shortDate(e.date)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-xs text-ink-3 mt-3">
+        Decisions are read from each statement. The &ldquo;post-announcement drift&rdquo; model tests whether rates keep
+        moving after a cut, hold or hike; it stays in shadow until that beats the random walk.
+      </p>
+      {(broken.length > 0 || notes.length > 0) && (
+        <ul className="mt-4 text-xs space-y-1">
+          {broken.map((h) => (
+            <li key={h.source} style={{ color: "var(--critical)" }}>
+              {h.label}: not read since {h.lastOkAt ? shortDate(h.lastOkAt.slice(0, 10)) : "setup"}
+              {h.error ? ` (${h.error.slice(0, 80)})` : ""}. Its events may be missing.
+            </li>
+          ))}
+          {notes.map((h) => (
+            <li key={h.source} className="text-ink-3">
+              {h.label}: {h.note}
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );
@@ -443,7 +579,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                     <td className="py-1.5 text-ink-2">{MODEL_LABELS[m] ?? m}</td>
                     {s.buckets.map((b) => (
                       <td key={b.bucket} className="py-1.5 text-right">
-                        <WeightCell w={b.weights[m]} mae={b.mae[m]} />
+                        <WeightCell w={b.weights[m]} mae={b.mae[m]} shadow={b.promoted?.[m] === false} />
                       </td>
                     ))}
                   </tr>
@@ -473,7 +609,17 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
   );
 }
 
-function WeightCell({ w, mae }: { w: number; mae: number | null }) {
+function WeightCell({ w, mae, shadow }: { w: number; mae: number | null; shadow?: boolean }) {
+  if (shadow) {
+    return (
+      <span
+        className="text-xs text-ink-3"
+        title={`scored but not used until it beats the random walk${mae == null ? "" : ` · avg miss ${mae.toFixed(3)}%`}`}
+      >
+        shadow
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center justify-end gap-2" title={mae == null ? "no data yet" : `avg miss ${mae.toFixed(3)}%`}>
       <span className="hidden sm:inline-block h-1.5 w-12 rounded-full bg-surface-2 overflow-hidden">

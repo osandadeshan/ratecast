@@ -59,6 +59,7 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
           80% range
         </span>
         <LegendItem color="var(--series-3)" label="Same day last month" thin />
+        {month.some((d) => d.events.length > 0) && <LegendItem color="var(--text-3)" label="Policy event" dotted />}
       </div>
       <div className="h-[300px] sm:h-[340px] -ml-2">
         <ResponsiveContainer width="100%" height="100%">
@@ -99,6 +100,7 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
                     )}
                     {p.delta !== null && <Row label="Miss" value={`${fmt(p.delta, decimals)} (${pct(-p.pctError!, 3)})`} />}
                     {p.lastMonth !== null && <Row label="Last month" value={fmt(p.lastMonth, decimals)} />}
+                    {p.events.length > 0 && <Row label="Policy event" value={p.events.join(", ")} />}
                   </div>
                 );
               }}
@@ -137,6 +139,18 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
               activeDot={{ r: 4.5, strokeWidth: 2, stroke: "var(--surface)" }}
               isAnimationActive={false}
             />
+            {month
+              .filter((d) => d.events.length > 0)
+              .map((d) => (
+                <ReferenceLine
+                  key={d.date}
+                  x={Number(d.date.slice(8))}
+                  stroke="var(--text-3)"
+                  strokeDasharray="1 3"
+                  strokeOpacity={0.8}
+                  label={{ value: d.events.join("·"), position: "insideBottomLeft", fill: "var(--text-3)", fontSize: 10 }}
+                />
+              ))}
             <ReferenceLine
               x={Number(today.slice(8))}
               stroke="var(--text-3)"
@@ -159,7 +173,19 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function LegendItem({ color, label, dashed, thin }: { color: string; label: string; dashed?: boolean; thin?: boolean }) {
+function LegendItem({
+  color,
+  label,
+  dashed,
+  thin,
+  dotted,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+  thin?: boolean;
+  dotted?: boolean;
+}) {
   return (
     <span className="inline-flex items-center gap-2">
       <svg width="20" height="8" aria-hidden>
@@ -170,7 +196,7 @@ function LegendItem({ color, label, dashed, thin }: { color: string; label: stri
           y2="4"
           stroke={color}
           strokeWidth={thin ? 1.5 : 2}
-          strokeDasharray={dashed ? "5 3" : undefined}
+          strokeDasharray={dashed ? "5 3" : dotted ? "1 3" : undefined}
           strokeLinecap="round"
         />
       </svg>

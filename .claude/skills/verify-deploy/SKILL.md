@@ -16,5 +16,27 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    - `sync: "error"` means reading the message. It's in the JSON as `.lastSync.message`.
 3. **Cron auth.** `curl -s -o /dev/null -w "%{http_code}\n" $URL/api/cron/sync` must be **401** (proves
    `CRON_SECRET` is set). Don't call it with the secret unless the user provides it and asks for a manual run.
-4. **Next day.** `.lastSync.at` should be about 01:30 UTC and `recentDeltas` should gain a row each day.
-5. Report findings plainly, with the exact fix in the Vercel dashboard.
+4. **Policy events.** The sync log (`.lastSync.message`) must have an `events:` line with a count per source. Then:
+   `curl -s $URL/api/dashboard | jq '.events | {upcoming: [.upcoming[] | "\(.date) \(.short)"], health: [.health[] | {source, ok, error, note}]}'`
+   - Every `health[].ok` should be `true`, and `upcoming` should list the next FOMC/CBSL dates.
+   - `ok: false` with an `error` means a scraper broke or the site blocks Vercel. Reproduce from the shell with a
+     generic UA (URLs are in `.claude/rules/events.md`). If it works locally but not on Vercel, it's an IP block
+     (report it, don't work around it with paid proxies). If the layout changed, fix the parse function in
+     `lib/sources/events.ts`. Forecasts still work meanwhile: that event kind just stops widening the band.
+   - A `note` (e.g. "next review date not announced yet") is expected around year end, not a failure.
+5. **Macro factors.** The log must have `ust2y: N days` and `brent: N days` lines. Then:
+   `curl -s $URL/api/dashboard | jq '.macro, [.events.health[] | select(.source=="treasury" or .source=="fred-brent")]'`
+   - `.macro` should list `ust2y` (date = last US business day) and `brent` (about a week old, which is normal).
+   - The first sync takes ~1 min longer: it downloads 3 yearly Treasury CSVs, one at a time, and home.treasury.gov
+     can take ~20 s each. `treasury` failing with a timeout once is OK; it should be ok after the next run.
+   - The `macro` model shows "shadow" in the weights table until it beats the random walk. That's by design.
+6. **Decision outcomes.** After the first sync, past events should carry outcomes:
+   `curl -s $URL/api/dashboard | jq '[.events.recent[] | "\(.date) \(.short) \(.outcome)"], [.events.health[] | select(.source=="outcomes")]'`
+   - Recent Fed/CBSL events show `cut`/`hold`/`hike`. `outcomes` health is `ok: true`. The log has an
+     `outcomes: classified N/M` line on runs that had pending events.
+   - The first run reads up to 32 statements (FOMC HTML + CBSL PDFs), which adds ~20 s. Any rest follow next day,
+     shown as the note "N statements not read yet". `unclear` means a statement's wording changed: update the
+     classifier in `lib/sources/events.ts` (phrases are in `.claude/rules/events.md`).
+   - `news` shows "shadow" in the weights table until it beats the random walk. That's by design.
+7. **Next day.** `.lastSync.at` should be about 01:30 UTC and `recentDeltas` should gain a row each day.
+8. Report findings plainly, with the exact fix in the Vercel dashboard.

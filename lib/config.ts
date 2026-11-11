@@ -26,3 +26,17 @@ export function bucketOf(h: number): number {
 
 export const USER_AGENT =
   "Mozilla/5.0 (compatible; RateCast/1.0; +https://vercel.com)";
+
+/**
+ * Macro factors for the `macro` model (series names in market_data). lagDays = how many days after
+ * its date a value is safely available at the 09:30 SGT sync. Replay and live both restrict each
+ * factor to date <= anchor - lagDays, so the backtest sees exactly what the live run would.
+ * transform: "diff" for yields (percentage points), "log" for prices.
+ */
+export const MACRO_FACTORS = [
+  { series: "ust2y", label: "US 2-year yield", lagDays: 1, transform: "diff" },
+  { series: "brent", label: "Brent crude oil", lagDays: 9, transform: "log" },
+] as const;
+export type MacroSeries = (typeof MACRO_FACTORS)[number]["series"];
+/** The macro model reacts to each factor's move over this many days (ending at its lagged date). */
+export const MACRO_WINDOW_DAYS = 5;

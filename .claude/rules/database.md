@@ -20,10 +20,12 @@ paths:
   |---|---|---|
   | `rates_history` | ingest | `source` = `wise` (official) or `wise_live` (provisional today) |
   | `live_quotes` | ingest | provider comparison JSON, pruned after 60 days |
-  | `market_data` | ingest | `usd_basket`, `xc:<CUR>:<source>` cross-checks |
+  | `market_data` | ingest | `usd_basket`, `xc:<CUR>:<source>` cross-checks, `ust2y` (Treasury 2y %, US date), `brent` (FRED USD/bbl) |
   | `predictions` | predict | unique (currency, made_on, target_date, model); pruned after ~400 days |
   | `prediction_errors` | evaluate SQL | the delta table; FK cascade from predictions |
   | `model_stats` | predict | JSON of `LearnedStats` per currency per day |
+  | `events` | `ingestEvents` + `classifyOutcomes` (sync) | PK (kind, event_date). `known_since` gates replay (upsert keeps `LEAST`). `outcome` (added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`): `cut`/`hold`/`hike`, `sla`/`board`/`other`, `unclear`, or NULL until classified; the upsert never overwrites it. ~10 rows/year/kind |
+  | `source_health` | `recordHealth` (sync) | PK source. Last ok / error / note per automatic source: fed-page, fed-json, cbsl-mpr, cbsl-rss, treasury, fred-brent |
   | `sync_runs`, `sync_lock` | runSync | lock row expires after 5 min |
 - Neon free tier is 0.5 GB. Keep pruning in place, and estimate rows/day before adding per-model or per-day data.
 - Local inspection: `docker exec ratecast-pg psql -U postgres -d rates -c "<sql>"`.

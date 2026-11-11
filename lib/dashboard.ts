@@ -1,7 +1,8 @@
 import { cacheLife } from "next/cache";
-import { DECIMALS, HORIZON_BUCKETS, TARGETS, type Target, bucketOf } from "./config";
+import { DECIMALS, HORIZON_BUCKETS, MACRO_FACTORS, TARGETS, type Target, bucketOf } from "./config";
 import { addDays, addMonths, dateRange, monthBounds, todayISO } from "./dates";
 import { db, ensureSchema, hasDb } from "./db";
+import { EVENT_KINDS, type EventKind } from "./predict/events";
 import type { LearnedStats } from "./predict/learning";
 import { type CrossCheck } from "./sources/market";
 import { type LiveQuote, fetchWiseComparison } from "./sources/wise";
@@ -18,6 +19,26 @@ export interface MonthDay {
   delta: number | null; // actual - predicted
   pctError: number | null;
   lastMonth: number | null; // rate on the same day-of-month last month
+  events: string[]; // short labels of policy events announced on this date ("Fed", "CBSL")
+}
+
+export interface EventView {
+  kind: string;
+  label: string;
+  short: string;
+  date: string;
+  title: string;
+  url: string | null;
+  outcome: string | null; // cut | hold | hike | sla | board | other | unclear, filled after the event
+}
+
+export interface SourceHealthView {
+  source: string;
+  label: string;
+  ok: boolean; // last attempt succeeded and it succeeded within STALE_DAYS
+  lastOkAt: string | null;
+  error: string | null;
+  note: string | null;
 }
 
 export interface DeltaRow {
@@ -65,6 +86,39 @@ export interface Dashboard {
   dbConfigured: boolean;
   lastSync: { at: string; status: string; message: string | null } | null;
   currencies: CurrencyDashboard[];
+  events: { upcoming: EventView[]; recent: EventView[]; health: SourceHealthView[] };
+  /** Latest macro factor values (inputs of the `macro` model). change30d: pp for yields, % for prices. */
+  macro: { series: string; label: string; value: number; date: string; change30d: number | null; unit: "pp" | "%" }[];
+}
+
+const STALE_DAYS = 3;
+const SOURCE_LABEL: Record<string, string> = {
+  "fed-page": "Fed FOMC calendar page",
+  "fed-json": "Fed calendar feed",
+  "cbsl-mpr": "CBSL policy review list",
+  "cbsl-rss": "CBSL press releases (RSS)",
+  treasury: "US Treasury yield curve",
+  "fred-brent": "FRED Brent oil price",
+  outcomes: "Decision outcomes (statements)",
+};
+
+function eventView(r: {
+  kind: string;
+  event_date: string;
+  title: string;
+  url: string | null;
+  outcome: string | null;
+}): EventView {
+  const k = EVENT_KINDS[r.kind as EventKind];
+  return {
+    kind: r.kind,
+    label: k?.label ?? r.kind,
+    short: k?.short ?? r.kind,
+    date: r.event_date,
+    title: r.title,
+    url: r.url,
+    outcome: r.outcome,
+  };
 }
 
 async function cachedLiveQuote(target: Target): Promise<LiveQuote> {
@@ -95,7 +149,15 @@ export async function getDashboard(): Promise<Dashboard> {
         return emptyCurrency(t, live, start, end, today);
       }),
     );
-    return { today, monthLabel, dbConfigured: false, lastSync: null, currencies };
+    return {
+      today,
+      monthLabel,
+      dbConfigured: false,
+      lastSync: null,
+      currencies,
+      events: { upcoming: [], recent: [], health: [] },
+      macro: [],
+    };
   }
 
   await ensureSchema();
@@ -103,7 +165,51 @@ export async function getDashboard(): Promise<Dashboard> {
   const [lastSync] = await sql`
     SELECT finished_at, started_at, status, message FROM sync_runs ORDER BY id DESC LIMIT 1`;
 
-  const currencies = await Promise.all(TARGETS.map((t) => currencyDashboard(t, today, start, end)));
+  const [eventRows, healthRows, macroRows] = await Promise.all([
+    sql`SELECT kind, event_date::text AS event_date, title, url, outcome FROM events
+        WHERE known_since <= ${today}
+          AND event_date BETWEEN ${addDays(today, -45)} AND ${addDays(today, 75)}
+        ORDER BY event_date`,
+    sql`SELECT source, last_ok_at, last_error_at, last_error, last_note FROM source_health ORDER BY source`,
+    sql`SELECT series, date::text AS date, value FROM market_data
+        WHERE series = ANY(${MACRO_FACTORS.map((f) => f.series as string)}) AND date >= ${addDays(today, -75)}
+        ORDER BY date`,
+  ]);
+  const macro: Dashboard["macro"] = [];
+  for (const f of MACRO_FACTORS) {
+    const pts = macroRows.filter((r) => r.series === f.series);
+    const latest = pts.at(-1);
+    if (!latest) continue;
+    const ref = [...pts].reverse().find((p) => p.date <= addDays(latest.date, -30));
+    const change30d = !ref ? null : f.transform === "diff" ? latest.value - ref.value : (latest.value / ref.value - 1) * 100;
+    macro.push({
+      series: f.series,
+      label: f.label,
+      value: latest.value,
+      date: latest.date,
+      change30d,
+      unit: f.transform === "diff" ? "pp" : "%",
+    });
+  }
+  const evs = eventRows.map((r) => eventView(r as never));
+  const monthEvents = new Map<string, string[]>();
+  for (const e of evs) monthEvents.set(e.date, [...(monthEvents.get(e.date) ?? []), e.short]);
+  const staleBefore = Date.now() - STALE_DAYS * 86_400_000;
+  const health: SourceHealthView[] = healthRows.map((h) => {
+    const okAt: Date | null = h.last_ok_at;
+    const errAt: Date | null = h.last_error_at;
+    const failingNow = errAt !== null && (okAt === null || errAt > okAt);
+    return {
+      source: h.source,
+      label: SOURCE_LABEL[h.source] ?? h.source,
+      ok: !failingNow && okAt !== null && okAt.getTime() >= staleBefore,
+      lastOkAt: okAt ? okAt.toISOString() : null,
+      error: failingNow ? h.last_error : null,
+      note: h.last_note,
+    };
+  });
+
+  const currencies = await Promise.all(TARGETS.map((t) => currencyDashboard(t, today, start, end, monthEvents)));
   return {
     today,
     monthLabel,
@@ -112,6 +218,12 @@ export async function getDashboard(): Promise<Dashboard> {
       ? { at: (lastSync.finished_at ?? lastSync.started_at).toISOString(), status: lastSync.status, message: lastSync.message }
       : null,
     currencies,
+    events: {
+      upcoming: evs.filter((e) => e.date >= today),
+      recent: evs.filter((e) => e.date < today).reverse(),
+      health,
+    },
+    macro,
   };
 }
 
@@ -137,6 +249,7 @@ function emptyCurrency(target: Target, live: LiveQuote | null, start: string, en
       delta: null,
       pctError: null,
       lastMonth: null,
+      events: [],
     })),
     recentDeltas: [],
     accuracy: [],
@@ -145,7 +258,13 @@ function emptyCurrency(target: Target, live: LiveQuote | null, start: string, en
   };
 }
 
-async function currencyDashboard(target: Target, today: string, start: string, end: string): Promise<CurrencyDashboard> {
+async function currencyDashboard(
+  target: Target,
+  today: string,
+  start: string,
+  end: string,
+  monthEvents: Map<string, string[]>,
+): Promise<CurrencyDashboard> {
   const sql = db();
   const histFrom = addMonths(start, -1);
   const [history, preds, deltas, errAgg, statsRow, basketRows, crossRows, liveFresh, dbLive] = await Promise.all([
@@ -222,6 +341,7 @@ async function currencyDashboard(target: Target, today: string, start: string, e
       delta,
       pctError: delta !== null && actual ? ((predicted! - actual) / actual) * 100 : null,
       lastMonth: lm?.rate ?? null,
+      events: monthEvents.get(date) ?? [],
     };
   });
 
@@ -242,6 +362,7 @@ async function currencyDashboard(target: Target, today: string, start: string, e
           delta: null,
           pctError: null,
           lastMonth: null,
+          events: monthEvents.get(tomorrowDate) ?? [],
         }
       : null);
   const monthEnd = end > today ? month[month.length - 1] : null;

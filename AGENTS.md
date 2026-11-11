@@ -42,11 +42,18 @@ app/page.tsx                  Server page: Suspense + connection(); after() trig
 app/components/               Client UI (DashboardView = whole page, MonthChart = Recharts)
 app/api/cron/sync/route.ts    Daily Vercel Cron target (Bearer CRON_SECRET)
 app/api/dashboard/route.ts    Read-only JSON of everything on the page
-lib/config.ts                 Currencies, horizons, windows, timezone (single source of truth)
+lib/config.ts                 Currencies, horizons, windows, timezone, MACRO_FACTORS (single source of truth)
 lib/dates.ts                  YYYY-MM-DD string date math (UTC-based)
 lib/db.ts                     postgres.js client + idempotent CREATE TABLE IF NOT EXISTS schema
-lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks)
-lib/predict/                  series helpers, models, learning (weights/bias/sigma), engine (forecast)
+lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks),
+                              macro (US Treasury 2y yield CSV, FRED Brent CSV),
+                              events (Fed FOMC page + JSON, CBSL review list + PDF, CBSL RSS,
+                              decision outcomes read from each FOMC statement / CBSL review PDF),
+                              pdf (dependency-free PDF text via node:zlib), http (getJSON/getText/getBytes)
+lib/predict/                  series helpers, models (incl. `macro` + SHADOW_MODELS), learning (weights/bias/
+                              sigma/shadow promotion), events (event-day
+                              volatility + band widening), news (post-announcement drift for the
+                              shadow `news` model), engine (forecast)
 lib/sync.ts                   Orchestration of a sync run, incl. no-lookahead replay of missed days
 lib/dashboard.ts              All read queries for the page
 scripts/sync.ts               CLI wrapper for runSync()
@@ -59,14 +66,34 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
    on this.
 2. **Actuals are official only.** `prediction_errors` is filled only from `rates_history.source = 'wise'`.
    Today's live quote is stored as `source = 'wise_live'` (provisional) and is overwritten by Wise's daily point.
-3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market`
+3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news`
    plus the derived `blend` (raw weighted), `blend_bc` (blend with bias correction, always stored as the
    counterfactual) and `ensemble` (the final number shown to users). Renaming a model orphans its history.
 4. **Schema changes are additive.** `ensureSchema()` runs `CREATE ... IF NOT EXISTS` on every cold start. There
    is no migration tool: add new tables/columns with `IF NOT EXISTS`, never drop or rename.
 5. **GET route handlers with side effects must `await connection()` first.** Cache Components is on, and
    without it Next prerenders the handler at build time (this once ran a full sync during `next build`).
-6. **Dates are `YYYY-MM-DD` strings.** "Today" is Singapore time (`todayISO()`). Wise history points are UTC
+6. **Policy events are automatic, band-only and look-ahead-free.** (`lib/sources/events.ts`, `lib/predict/events.ts`)
+   - Every event comes from a scraper. The owner will **never** enter dates or data by hand, so don't design
+     anything that needs it. If a source has no clean feed, parse HTML/PDF, infer, or record after the fact.
+   - `events.kind` values (`fomc`, `cbsl_policy`, `imf`) are data, like model names: never rename.
+   - A forecast made on day `t` uses only events with `known_since <= t`. `learnEventVol` only learns from
+     events whose move window has closed (`event_date + 1 <= t`).
+   - Events widen only the `ensemble` 80% band. They never change any point forecast.
+   - Each scraper fails on its own: log it, write `source_health`, and carry on. A scraper must never fail
+     the sync.
+   - `events.outcome` (`cut | hold | hike`, IMF `sla | board | other`, `unclear`) is read from the event's
+     **own** statement: FOMC `monetaryYYYYMMDDa.htm`, or the CBSL review PDF whose file name carries
+     `press_YYYYMMDD` of that event. Never classify from a different statement's PDF. An outcome counts only
+     from `event_date + 1` (CBSL publishes after the 09:30 SGT sync). Once set, the upsert never overwrites it.
+7. **Macro factors are lagged, and new models start in shadow.** (`lib/config.ts`, `lib/predict/models.ts`)
+   - Each factor in `MACRO_FACTORS` has a `lagDays` (`ust2y` 1, `brent` 9: FRED's Brent runs ~1 week late).
+     Replay and live both see only `date <= anchor - lagDays` (`factorsAt` in `lib/sync.ts`). Don't use a
+     factor value the 09:30 SGT sync couldn't have had.
+   - Every model built on new external data goes into `SHADOW_MODELS` first (now `macro` and `news`). It's run and scored daily but
+     gets weight 0, and is left out of the pooled MAE, until in that horizon bucket it has ≥ 30 distinct
+     target dates and MAE < 0.98 × the random walk's. Promotion is automatic (`BucketStats.promoted`).
+8. **Dates are `YYYY-MM-DD` strings.** "Today" is Singapore time (`todayISO()`). Wise history points are UTC
    midnight. Select dates as `date::text` and never pass JS `Date` objects for `date` columns.
 
 ## Conventions
@@ -76,4 +103,12 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
 - UI colours come from CSS tokens in `app/globals.css` (light + dark). Chart series: `--series-1` actual,
   `--series-2` predicted/band, `--series-3` last month. Don't hard-code hex in components.
 - Outbound fetches go through `lib/sources/http.ts` (timeout, generic User-Agent, `no-store`).
+- Policy events fit the free tier: no new dependency (PDF text is extracted with `node:zlib`), no API key,
+  and they run inside the same single daily cron. Outcome classification reads at most 32 statements per
+  run. Not built yet: MAS statements (site still shows a maintenance page), IMF forward windows, GDELT news
+  tone (rate-limited from here, and the DOC API only keeps a rolling 3 months, so no backfill). See
+  `docs/CONTEXT.md`.
+- Macro factors (Treasury yield curve CSV, FRED Brent CSV) are keyless and use the same cron. Polymarket/Kalshi
+  Fed odds are deferred: per-meeting contracts would need stitching and have short histories, and the 2y yield
+  (same information) earned no weight. Revisit only if `macro` gets promoted.
 - Be honest in UI copy: FX is close to a random walk. Always show accuracy next to the random-walk baseline.

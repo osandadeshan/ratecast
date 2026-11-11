@@ -1,6 +1,8 @@
 import { HORIZON_BUCKETS, LEARNING_WINDOW_DAYS, bucketOf } from "../config";
 import { addDays, diffDays } from "../dates";
-import { MODEL_NAMES } from "./models";
+import type { EventVolStat } from "./events";
+import type { NewsDriftStat } from "./news";
+import { MODEL_NAMES, SHADOW_MODELS } from "./models";
 
 /** One evaluated prediction (a row of prediction_errors). */
 export interface ErrorRecord {
@@ -23,12 +25,18 @@ export interface BucketStats {
   maeCorrected: number | null; // % — blend with bias correction (counterfactual, always tracked)
   sigma: number | null; // std of final-ensemble log errors
   sigmaN: number;
+  /** Shadow models only: true once the model has beaten the random walk in this bucket (weight > 0). */
+  promoted?: Record<string, boolean>;
 }
 
 export interface LearnedStats {
   asOf: string;
   windowDays: number;
   buckets: BucketStats[];
+  /** Per event kind: how much bigger moves are around announcements (set by sync, see events.ts). */
+  events?: EventVolStat[];
+  /** Post-announcement drift per `kind:outcome` (set by sync, see news.ts). */
+  news?: NewsDriftStat[];
 }
 
 const SHRINK_MAE = 10;
@@ -37,6 +45,13 @@ const HALF_LIFE = 14;
 /** Higher = trust the historically best models more aggressively. */
 const WEIGHT_POWER = 4;
 const MIN_GATE_SAMPLES = 20;
+/**
+ * A shadow model is promoted in a bucket only if it has been scored on this many distinct target
+ * dates (long-horizon forecasts overlap heavily, so raw counts overstate the evidence) and its
+ * MAE is at least PROMOTE_MARGIN better than the random walk's.
+ */
+const MIN_PROMOTE_DATES = 30;
+const PROMOTE_MARGIN = 0.98;
 /** Long-horizon errors arrive weeks late (stale regime), so only correct bias up to this horizon. */
 const MAX_BIAS_BUCKET = 7;
 
@@ -58,12 +73,23 @@ export function learn(errors: ErrorRecord[], asOf: string): LearnedStats {
       n[m] = xs.length;
       mae[m] = xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
     }
-    const known = MODEL_NAMES.filter((m) => mae[m] !== null);
+    // Shadow models are scored but get weight 0 until they beat the random walk (naive) here.
+    const promoted: Record<string, boolean> = {};
+    for (const m of SHADOW_MODELS) {
+      const dates = new Set(inB.filter((e) => e.model === m).map((e) => e.targetDate)).size;
+      promoted[m] =
+        dates >= MIN_PROMOTE_DATES && mae.naive !== null && mae[m] !== null && mae[m]! < PROMOTE_MARGIN * mae.naive!;
+    }
+    const active = (m: string) => !(m in promoted) || promoted[m];
+
+    const known = MODEL_NAMES.filter((m) => mae[m] !== null && active(m));
     const pooled = known.length ? known.reduce((s, m) => s + (mae[m] as number), 0) / known.length : null;
 
     const raw: Record<string, number> = {};
     for (const m of MODEL_NAMES) {
-      if (pooled === null) {
+      if (!active(m)) {
+        raw[m] = 0;
+      } else if (pooled === null) {
         raw[m] = 1;
       } else {
         const shrunk = ((mae[m] ?? pooled) * n[m] + pooled * SHRINK_MAE) / (n[m] + SHRINK_MAE);
@@ -110,6 +136,7 @@ export function learn(errors: ErrorRecord[], asOf: string): LearnedStats {
       maeCorrected: mc.mae === null ? null : mc.mae * 100,
       sigma,
       sigmaN: ens.length,
+      promoted,
     };
   });
 

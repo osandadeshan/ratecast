@@ -94,6 +94,33 @@ CREATE TABLE IF NOT EXISTS model_stats (
   PRIMARY KEY (currency, as_of)
 );
 
+-- Policy events, fetched automatically (FOMC, CBSL reviews, IMF news). kind is data: never rename.
+-- known_since = first day the event and its date were public (no-look-ahead gate for replay).
+CREATE TABLE IF NOT EXISTS events (
+  kind        text NOT NULL,                 -- fomc | cbsl_policy | imf
+  event_date  date NOT NULL,                 -- announcement date (institution's local date)
+  known_since date NOT NULL,
+  source      text NOT NULL,                 -- fed-page | fed-json | cbsl-mpr | cbsl-rss
+  title       text NOT NULL,
+  url         text,
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (kind, event_date)
+);
+
+-- What was decided (cut | hold | hike for policy reviews; sla | board | other for IMF news).
+-- Filled automatically after the announcement from the statement itself; 'unclear' if unparsable.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS outcome text;
+
+-- Last outcome of each automatic scraper, so a broken source is visible instead of silent.
+CREATE TABLE IF NOT EXISTS source_health (
+  source        text PRIMARY KEY,
+  last_ok_at    timestamptz,
+  last_error_at timestamptz,
+  last_error    text,
+  last_note     text,
+  last_count    int
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          bigserial PRIMARY KEY,
   started_at  timestamptz NOT NULL DEFAULT now(),
