@@ -10,7 +10,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 # RateCast: guide for coding agents
 
-RateCast is a no-login Next.js app on Vercel. It shows today's **SGD → LKR**, **SGD → USD** and **USD → LKR** Wise rates and a
+RateCast is a no-login Next.js app on Vercel. It shows today's **SGD → LKR**, **SGD → USD** and **LKR → USD** Wise rates and a
 month view: past days show the actual rate, future days show a forecast. Forecasts come from several models
 whose blend **learns from its own misses**. The rules below apply to every agent (Claude Code, Codex, Cursor,
 …). Deeper references: `docs/ARCHITECTURE.md` (how it works) and `docs/CONTEXT.md` (why, requirements,
@@ -109,6 +109,11 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
 8. **Pairs are data, and SGD→LKR is also forecast in two parts.** `TARGETS` ids (`LKR`, `USD`, `USDLKR`) are
    stored in every table: never rename. `PREDICT_ORDER` forecasts the legs (SGD→USD, USD→LKR) first so the
    `cross` model for SGD→LKR can use their `ensemble` forecasts made on the same anchor day.
+   - The third pair is **stored, learned and forecast as USD→LKR** (id `USDLKR`, ~300) but **shown as LKR → USD
+     per 1,000 LKR** (~3.0). `DISPLAY` in `lib/config.ts` sets this; `lib/dashboard.ts` converts every rate with
+     `per / rate` (band ends swap, deltas and % misses are recomputed, cross-checks too). Don't flip the stored
+     pair: CBSL's fixing, `cbsl_gap`, `lanka` and the `cross` legs are all quoted as USD→LKR. The provider
+     comparison stays USD→LKR (`providerPair`) because Wise has no quotes for sending from LKR.
 9. **Dates are `YYYY-MM-DD` strings.** "Today" is Singapore time (`todayISO()`). Wise history points are UTC
    midnight. Select dates as `date::text` and never pass JS `Date` objects for `date` columns.
 

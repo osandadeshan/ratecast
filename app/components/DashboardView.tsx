@@ -17,7 +17,7 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         <div>
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">RateCast</h1>
           <p className="text-sm text-ink-2 mt-1">
-            Wise mid-market rates for SGD → LKR, SGD → USD and USD → LKR, with forecasts that learn from their own
+            Wise mid-market rates for SGD → LKR, SGD → USD and LKR → USD, with forecasts that learn from their own
             misses.
           </p>
         </div>
@@ -46,8 +46,8 @@ export default function DashboardView({ data }: { data: Dashboard }) {
       )}
       {data.dbConfigured && !data.lastSync && (
         <Notice>
-          First run: the app is downloading history and replaying the last 90 days to train itself. Refresh in about a
-          minute.
+          First run: the app is downloading history and replaying the last year to train itself. Refresh in a minute or
+          two.
         </Notice>
       )}
 
@@ -120,7 +120,7 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
       <div className="col-span-2 lg:col-span-1">
         <Stat
           tone="lead"
-          label={`Today · 1 ${c.base}`}
+          label={`Today · ${c.per.toLocaleString("en-US")} ${c.base}`}
           value={live ? `${fmt(live, d)}` : "—"}
           sub={
             live ? (
@@ -266,11 +266,14 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
 
 function ProvidersCard({ c }: { c: CurrencyDashboard }) {
   const providers = c.live?.providers ?? [];
-  const d = c.decimals;
+  // Provider quotes stay in the stored pair: Wise has no comparison for sending from LKR.
+  const { base, quote, decimals: d } = c.providerPair;
   return (
     <section className="card p-4 sm:p-5 min-w-0">
-      <h2 className="text-lg font-semibold">Send 1,000 {c.base} today</h2>
-      <p className="text-xs text-ink-3 mt-0.5 mb-3">What the recipient gets, by provider (Wise comparison, bank transfer).</p>
+      <h2 className="text-lg font-semibold">Send 1,000 {base} today</h2>
+      <p className="text-xs text-ink-3 mt-0.5 mb-3">What the recipient gets, by provider (Wise comparison, bank transfer).
+        {c.inverted && <> Shown for {base} → {quote}: providers don&apos;t publish quotes for sending from {c.base}.</>}
+      </p>
       {providers.length === 0 ? (
         <p className="text-sm text-ink-3">Comparison unavailable right now.</p>
       ) : (
@@ -287,11 +290,11 @@ function ProvidersCard({ c }: { c: CurrencyDashboard }) {
                   )}
                 </div>
                 <div className="text-xs text-ink-3 num">
-                  rate {fmt(p.rate, d)} · fee {fmt(p.fee, 2)} {c.base}
+                  rate {fmt(p.rate, d)} · fee {fmt(p.fee, 2)} {base}
                 </div>
               </div>
               <div className="num text-sm font-semibold whitespace-nowrap">
-                {fmt(p.received, 2)} {c.quote}
+                {fmt(p.received, 2)} {quote}
               </div>
             </li>
           ))}
@@ -334,7 +337,7 @@ function MarketCard({
             </span>
           </dd>
         </div>
-        {macro.filter((f) => !f.lanka || c.quote === "LKR").map((f) => (
+        {macro.filter((f) => !f.lanka || c.target !== "USD").map((f) => (
           <div key={f.series}>
             <dt className="text-xs text-ink-3">
               {f.label} <span className="whitespace-nowrap">· {shortDate(f.date)}</span>
@@ -360,7 +363,7 @@ function MarketCard({
       </dl>
       {macro.length > 0 && (
         <p className="text-xs text-ink-3 mt-2">
-          These feed the &ldquo;US yields + oil&rdquo;{c.quote === "LKR" ? <> and &ldquo;Sri Lanka data (CBSL)&rdquo;</> : null}{" "}
+          These feed the &ldquo;US yields + oil&rdquo;{c.target !== "USD" ? <> and &ldquo;Sri Lanka data (CBSL)&rdquo;</> : null}{" "}
           models. Like every model, they only count once they beat the random walk by a clear margin.
         </p>
       )}
@@ -611,7 +614,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                   {s.buckets.map((b) => (
                     <td key={b.bucket} className="num py-1.5 text-right text-xs">
                       {b.biasOn ? (
-                        <span style={{ color: "var(--good-text)" }}>✓ on {pct(-b.bias * 100, 3)}</span>
+                        <span style={{ color: "var(--good-text)" }}>✓ on {pct((c.inverted ? b.bias : -b.bias) * 100, 3)}</span>
                       ) : (
                         <span className="text-ink-3">off</span>
                       )}

@@ -1,5 +1,5 @@
 import { cacheLife } from "next/cache";
-import { DECIMALS, HORIZON_BUCKETS, MACRO_FACTORS, PAIRS, SRI_LANKA_META, TARGETS, type Target, bucketOf } from "./config";
+import { DECIMALS, DISPLAY, HORIZON_BUCKETS, MACRO_FACTORS, PAIRS, SRI_LANKA_META, TARGETS, type Target, bucketOf } from "./config";
 import { addDays, addMonths, dateRange, monthBounds, todayISO } from "./dates";
 import { db, ensureSchema, hasDb } from "./db";
 import { EVENT_KINDS, type EventKind } from "./predict/events";
@@ -66,6 +66,16 @@ export interface CurrencyDashboard {
   /** "LKR", "USD": the currency received. */
   quote: string;
   label: string; // "SGD → LKR"
+  /** Amount of `base` the shown rates are for (1, or 1,000 for LKR → USD). */
+  per: number;
+  /**
+   * True when the page shows the inverse of the stored pair (USDLKR is shown as LKR → USD). All rates
+   * in this object are already in the shown orientation, except `live.providers`, which stay in the
+   * stored one (see `providerPair`). Signs of learned log biases flip.
+   */
+  inverted: boolean;
+  /** Pair of the provider comparison (Wise has no comparison for sending from LKR). */
+  providerPair: { base: string; quote: string; decimals: number };
   decimals: number;
   live: LiveQuote | null;
   liveSource: "wise-live" | "db" | "none";
@@ -265,16 +275,42 @@ export async function getDashboard(): Promise<Dashboard> {
   };
 }
 
-const pairInfo = (t: Target) => ({ base: PAIRS[t].base, quote: PAIRS[t].quote, label: PAIRS[t].label });
+const pairInfo = (t: Target) => {
+  const s = DISPLAY[t];
+  return {
+    base: s?.base ?? PAIRS[t].base,
+    quote: s?.quote ?? PAIRS[t].quote,
+    label: s?.label ?? PAIRS[t].label,
+    per: s?.per ?? 1,
+    inverted: Boolean(s),
+    providerPair: { base: PAIRS[t].base, quote: PAIRS[t].quote, decimals: DECIMALS[t] },
+    decimals: s?.decimals ?? DECIMALS[t],
+  };
+};
+
+/** Stored-orientation rate → shown rate (identity unless the pair is shown inverted). */
+const shown = (t: Target) => {
+  const s = DISPLAY[t];
+  return s ? (x: number) => s.per / x : (x: number) => x;
+};
+const shownOrNull = (t: Target) => {
+  const f = shown(t);
+  return (x: number | null | undefined) => (x == null ? null : f(x));
+};
+
+/** Live quote with midRate in the shown orientation; providers keep the stored pair. */
+function shownLive(t: Target, live: LiveQuote | null): LiveQuote | null {
+  return live && DISPLAY[t] ? { ...live, midRate: shown(t)(live.midRate) } : live;
+}
 
 /** CBSL's own fixing for this pair, shown as a cross-check (LKR pairs only). */
 const CBSL_SERIES: Partial<Record<Target, string>> = { LKR: "lk_sgd_ind", USDLKR: "lk_usd_spot" };
 
-function emptyCurrency(target: Target, live: LiveQuote | null, start: string, end: string, today: string): CurrencyDashboard {
+function emptyCurrency(target: Target, rawLive: LiveQuote | null, start: string, end: string, today: string): CurrencyDashboard {
+  const live = shownLive(target, rawLive);
   return {
     target,
     ...pairInfo(target),
-    decimals: DECIMALS[target],
     live,
     liveSource: live ? "wise-live" : "none",
     previousClose: null,
@@ -342,11 +378,27 @@ async function currencyDashboard(
         WHERE currency = ${target} ORDER BY fetched_at DESC LIMIT 1`,
   ]);
 
+  // Everything below is in the shown orientation (LKR → USD per 1,000 LKR for USDLKR).
+  const f = shown(target);
+  const fn = shownOrNull(target);
+  const inv = Boolean(DISPLAY[target]);
   const rates = new Map<string, { rate: number; source: string }>();
-  for (const h of history) rates.set(h.date, { rate: h.rate, source: h.source });
-  const predBy = new Map(preds.map((p) => [p.target_date as string, p]));
+  for (const h of history) rates.set(h.date, { rate: f(h.rate), source: h.source });
+  const predBy = new Map(
+    preds.map((p) => [
+      p.target_date as string,
+      {
+        target_date: p.target_date as string,
+        made_on: p.made_on as string,
+        predicted: f(p.predicted),
+        // Inverting swaps the band's ends.
+        lower80: fn(inv ? p.upper80 : p.lower80),
+        upper80: fn(inv ? p.lower80 : p.upper80),
+      },
+    ]),
+  );
 
-  let live: LiveQuote | null = liveFresh;
+  let live: LiveQuote | null = shownLive(target, liveFresh);
   let liveSource: CurrencyDashboard["liveSource"] = live ? "wise-live" : "none";
   if (!live && dbLive[0]) {
     const r = dbLive[0];
@@ -354,7 +406,7 @@ async function currencyDashboard(
       target,
       date: r.date,
       fetchedAt: r.fetched_at.toISOString(),
-      midRate: r.mid_rate,
+      midRate: f(r.mid_rate),
       sendAmount: 1000,
       providers: r.providers,
     };
@@ -462,16 +514,15 @@ async function currencyDashboard(
     seen.add(source);
     crossChecks.push({
       source,
-      rate: r.value,
+      rate: f(r.value),
       asOf: r.date,
-      diffPct: live ? (r.value / live.midRate - 1) * 100 : null,
+      diffPct: live ? (f(r.value) / live.midRate - 1) * 100 : null,
     });
   }
 
   return {
     target,
     ...pairInfo(target),
-    decimals: DECIMALS[target],
     live,
     liveSource,
     previousClose: prevDate ? { date: prevDate, rate: rates.get(prevDate)!.rate } : null,
@@ -479,14 +530,18 @@ async function currencyDashboard(
     tomorrow,
     monthEnd,
     month,
-    recentDeltas: deltas.map((d) => ({
-      targetDate: d.target_date,
-      madeOn: d.made_on,
-      predicted: d.predicted,
-      actual: d.actual,
-      delta: d.delta,
-      pctError: d.pct_error,
-    })),
+    recentDeltas: deltas.map((d) => {
+      const predicted = f(d.predicted);
+      const actual = f(d.actual);
+      return {
+        targetDate: d.target_date,
+        madeOn: d.made_on,
+        predicted,
+        actual,
+        delta: inv ? actual - predicted : d.delta,
+        pctError: inv ? ((predicted - actual) / actual) * 100 : d.pct_error,
+      };
+    }),
     accuracy,
     stats: (statsRow[0]?.stats as LearnedStats) ?? null,
     market: { trend30dPct, vol30dPct, usdBasket30dPct, crossChecks },

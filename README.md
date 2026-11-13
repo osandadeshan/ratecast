@@ -1,10 +1,10 @@
 # RateCast
 
-**SGD → LKR, SGD → USD and USD → LKR exchange-rate forecasts that learn from their own misses.**
+**SGD → LKR, SGD → USD and LKR → USD exchange-rate forecasts that learn from their own misses.**
 
 🔗 **Live:** https://ratecast.vercel.app · No login · Runs entirely on free tiers
 
-RateCast shows today's SGD → LKR, SGD → USD and USD → LKR rates from Wise and a full-month view: past days show the actual
+RateCast shows today's SGD → LKR, SGD → USD and LKR → USD rates from Wise and a full-month view: past days show the actual
 rate, future days show a forecast. Every forecast is stored. Once the real rate is published, the miss is
 recorded, and those misses decide how future forecasts are made. Inputs are fetched automatically from
 Wise, the ECB, the US Treasury, FRED (Brent), the Federal Reserve and the Central Bank of Sri Lanka (official
@@ -41,7 +41,7 @@ only gets weight once it is statistically better than the random walk ("no chang
 
 | | |
 |---|---|
-| **Today's rate** | Wise mid-market rate for 1 SGD → LKR, 1 SGD → USD and 1 USD → LKR (three tabs), with the change since yesterday |
+| **Today's rate** | Wise mid-market rate for 1 SGD → LKR, 1 SGD → USD and 1,000 LKR → USD (three tabs). The third pair is forecast as USD → LKR, the way Sri Lanka's central bank quotes it, and shown inverted, with the change since yesterday |
 | **Same day last month** | Rate on this date last month and how far it has moved since |
 | **Tomorrow & month-end forecast** | Forecast with an 80% likely range |
 | **Whole-month view** | Chart and day-by-day table: actual for past days, forecast for future days, and last month's rate for comparison |
@@ -589,7 +589,7 @@ average miss (%), final forecast vs "no change":
 |---|---|---|---|---|
 | **SGD → LKR** | 0.274 vs 0.274 | 0.441 vs 0.441 | 0.627 vs 0.627 | 0.932 vs 0.932 |
 | **SGD → USD** | 0.164 vs 0.164 | 0.304 vs 0.304 | 0.453 vs 0.453 | 0.628 vs 0.628 |
-| **USD → LKR** | 0.179 vs 0.179 | 0.338 vs 0.338 | 0.560 vs 0.560 | 1.009 vs 1.009 |
+| **USD → LKR** (shown as LKR → USD; % misses are the same) | 0.179 vs 0.179 | 0.338 vs 0.338 | 0.560 vs 0.560 | 1.009 vs 1.009 |
 
 Before the significance gate (12 Nov 2026) the forecast was *worse* than "no change" at every horizon (up to
 15% for SGD → USD at 15–31 days). Now no model has proven itself, so the forecast equals "no change". That's

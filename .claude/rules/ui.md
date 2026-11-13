@@ -18,8 +18,11 @@ paths:
 - Must work at **390px** wide with no horizontal page scroll. Grid/flex children holding tables get `min-w-0`,
   and wide tables sit in `overflow-x-auto`. Headless Chrome screenshots below ~500px are misleading; verify
   with Playwright device emulation (see the `run-locally` skill).
-- Three tabs, one per pair (`TARGETS`). Labels come from the payload's `c.base`/`c.quote` (from `PAIRS` in
-  `lib/config.ts`): never assume the base is SGD.
+- Three tabs, one per pair (`TARGETS`): SGD → LKR, SGD → USD, LKR → USD. Labels come from the payload's
+  `c.base`/`c.quote`/`c.label` and amounts from `c.per`: never assume the base is SGD or the amount is 1.
+- `USDLKR` is shown inverted (`c.inverted`, LKR → USD per 1,000 LKR, 4 decimals). The dashboard payload is
+  already converted, so components just print it. Exceptions: the provider card uses `c.providerPair`
+  (USD → LKR), and the learned log bias flips sign. Pair checks use `c.target`, not `c.quote`.
 - Models that only exist for some pairs are filtered with `PAIR_ONLY` in `DashboardView.tsx` (`lanka`,
   `cbsl_gap`: LKR + USDLKR; `cross`: LKR). Add new pair-specific models there. Gated models show "not used".
 - Sri Lanka series in Market context come from `SRI_LANKA_META` (`lib/config.ts`) via `lib/dashboard.ts`.
