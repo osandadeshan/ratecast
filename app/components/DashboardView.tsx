@@ -17,7 +17,8 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         <div>
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">RateCast</h1>
           <p className="text-sm text-ink-2 mt-1">
-            Wise mid-market rates, with forecasts that learn from their own misses.
+            Wise mid-market rates for SGD → LKR, SGD → USD and USD → LKR, with forecasts that learn from their own
+            misses.
           </p>
         </div>
         <div role="tablist" aria-label="Target currency" className="inline-flex rounded-xl bg-surface-2 p-1 self-start">
@@ -31,7 +32,7 @@ export default function DashboardView({ data }: { data: Dashboard }) {
                 i === tab ? "bg-surface text-ink shadow-sm" : "text-ink-2 hover:text-ink"
               }`}
             >
-              SGD → {cur.target}
+              {cur.label}
             </button>
           ))}
         </div>
@@ -66,9 +67,10 @@ export default function DashboardView({ data }: { data: Dashboard }) {
 
       <footer className="text-xs text-ink-3 pb-6 space-y-1">
         <p>
-          Rates: Wise (history and comparisons). Cross-checks: ExchangeRate-API, Currency-API. Market signal: ECB
-          reference rates via Frankfurter. Policy calendars: US Federal Reserve, Central Bank of Sri Lanka. Times in
-          Singapore (SGT).
+          Rates: Wise (history and comparisons). Cross-checks: ExchangeRate-API, Currency-API, CBSL official rates.
+          Market signals: ECB reference rates via Frankfurter, US Treasury yields, Brent oil (FRED), Central Bank of
+          Sri Lanka data (policy rate, T-bill yields, remittances, tourism). Policy calendars: US Federal Reserve,
+          Central Bank of Sri Lanka. Times in Singapore (SGT).
           {data.lastSync && (
             <>
               {" "}
@@ -118,12 +120,12 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
       <div className="col-span-2 lg:col-span-1">
         <Stat
           tone="lead"
-          label={`Today · 1 SGD`}
+          label={`Today · 1 ${c.base}`}
           value={live ? `${fmt(live, d)}` : "—"}
           sub={
             live ? (
               <>
-                {c.target} · Wise mid-market
+                {c.quote} · Wise mid-market
                 {c.live && (
                   <>
                     {" "}· {new Date(c.live.fetchedAt).toLocaleTimeString("en-SG", { timeZone: "Asia/Singapore", hour: "2-digit", minute: "2-digit" })}
@@ -188,11 +190,11 @@ function ChartSection({ c, today, monthLabel }: { c: CurrencyDashboard; today: s
     <section className="card p-4 sm:p-6 min-w-0">
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
         <h2 className="text-lg font-semibold">
-          {monthLabel} · SGD → {c.target}
+          {monthLabel} · {c.label}
         </h2>
         <span className="text-xs text-ink-3">Past days: actual Wise rate · future days: forecast</span>
       </div>
-      <MonthChart month={c.month} today={today} decimals={c.decimals} target={c.target} />
+      <MonthChart month={c.month} today={today} decimals={c.decimals} target={c.quote} />
     </section>
   );
 }
@@ -267,7 +269,7 @@ function ProvidersCard({ c }: { c: CurrencyDashboard }) {
   const d = c.decimals;
   return (
     <section className="card p-4 sm:p-5 min-w-0">
-      <h2 className="text-lg font-semibold">Send 1,000 SGD today</h2>
+      <h2 className="text-lg font-semibold">Send 1,000 {c.base} today</h2>
       <p className="text-xs text-ink-3 mt-0.5 mb-3">What the recipient gets, by provider (Wise comparison, bank transfer).</p>
       {providers.length === 0 ? (
         <p className="text-sm text-ink-3">Comparison unavailable right now.</p>
@@ -285,11 +287,11 @@ function ProvidersCard({ c }: { c: CurrencyDashboard }) {
                   )}
                 </div>
                 <div className="text-xs text-ink-3 num">
-                  rate {fmt(p.rate, d)} · fee {fmt(p.fee, 2)} SGD
+                  rate {fmt(p.rate, d)} · fee {fmt(p.fee, 2)} {c.base}
                 </div>
               </div>
               <div className="num text-sm font-semibold whitespace-nowrap">
-                {fmt(p.received, 2)} {c.target}
+                {fmt(p.received, 2)} {c.quote}
               </div>
             </li>
           ))}
@@ -332,19 +334,25 @@ function MarketCard({
             </span>
           </dd>
         </div>
-        {macro.map((f) => (
+        {macro.filter((f) => !f.lanka || c.quote === "LKR").map((f) => (
           <div key={f.series}>
             <dt className="text-xs text-ink-3">
               {f.label} <span className="whitespace-nowrap">· {shortDate(f.date)}</span>
             </dt>
             <dd className="num font-medium">
-              {f.unit === "pp" ? `${f.value.toFixed(2)}%` : `$${f.value.toFixed(2)}`}{" "}
+              {f.format === "pct"
+                ? `${f.value.toFixed(2)}%`
+                : f.format === "usd"
+                  ? `$${f.value.toFixed(2)}`
+                  : f.format === "usdmn"
+                    ? `$${f.value.toFixed(0)}m`
+                    : `${f.value.toFixed(2)} LKR`}{" "}
               <span className="text-ink-3 font-normal text-xs">
                 {f.change30d == null
                   ? ""
                   : f.unit === "pp"
                     ? `${f.change30d >= 0 ? "+" : ""}${f.change30d.toFixed(2)} pp 30d`
-                    : `${pct(f.change30d)} 30d`}
+                    : `${pct(f.change30d)}${f.label.includes("year earlier") ? "" : " 30d"}`}
               </span>
             </dd>
           </div>
@@ -352,8 +360,8 @@ function MarketCard({
       </dl>
       {macro.length > 0 && (
         <p className="text-xs text-ink-3 mt-2">
-          Yields and oil feed the &ldquo;US yields + oil&rdquo; model. It stays in shadow (weight 0) until it beats the
-          random walk.
+          These feed the &ldquo;US yields + oil&rdquo;{c.quote === "LKR" ? <> and &ldquo;Sri Lanka data (CBSL)&rdquo;</> : null}{" "}
+          models. Like every model, they only count once they beat the random walk by a clear margin.
         </p>
       )}
       {health
@@ -384,7 +392,16 @@ function MarketCard({
 }
 
 /** Health rows that belong to the Market context card rather than Policy events. */
-const MACRO_SOURCES = new Set(["treasury", "fred-brent"]);
+const MACRO_SOURCES = new Set([
+  "treasury",
+  "fred-brent",
+  "cbsl-fx",
+  "cbsl-rates",
+  "cbsl-external",
+  "wise-history:LKR",
+  "wise-history:USD",
+  "wise-history:USDLKR",
+]);
 
 const OUTCOME_LABEL: Record<string, string> = {
   cut: "cut",
@@ -410,7 +427,7 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
       <h2 className="text-lg font-semibold">Policy events</h2>
       <p className="text-xs text-ink-3 mt-0.5 mb-3">
         Scheduled central-bank decisions, read automatically from the Fed and CBSL. They only widen the 80% range for
-        SGD → {c.target}; the predicted number doesn&apos;t change, because nobody knows the decision in advance.
+        {c.label}; the predicted number doesn&apos;t change, because nobody knows the decision in advance.
       </p>
       {events.upcoming.length === 0 ? (
         <p className="text-sm text-ink-3">No scheduled decisions in the next 75 days.</p>
@@ -457,7 +474,7 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
       )}
       <p className="text-xs text-ink-3 mt-3">
         Decisions are read from each statement. The &ldquo;post-announcement drift&rdquo; model tests whether rates keep
-        moving after a cut, hold or hike; it stays in shadow until that beats the random walk.
+        moving after a cut, hold or hike; it only counts once that clearly beats the random walk.
       </p>
       {(broken.length > 0 || notes.length > 0) && (
         <ul className="mt-4 text-xs space-y-1">
@@ -478,19 +495,24 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
   );
 }
 
+const PAIR_ONLY: Record<string, readonly string[]> = { lanka: ["LKR", "USDLKR"], cbsl_gap: ["LKR", "USDLKR"], cross: ["LKR"] };
+
 function LearningSection({ c }: { c: CurrencyDashboard }) {
   const d = c.decimals;
   const s = c.stats;
-  const models = s ? Object.keys(s.buckets[0].weights) : [];
+  // Pair-specific models equal the random walk on other pairs: don't list them there.
+  const models = s ? Object.keys(s.buckets[0].weights).filter((m) => !PAIR_ONLY[m] || PAIR_ONLY[m].includes(c.target)) : [];
   return (
     <section className="card p-4 sm:p-6 space-y-6 min-w-0">
       <div>
         <h2 className="text-lg font-semibold">How the predictor learns</h2>
         <p className="text-sm text-ink-2 mt-1 max-w-3xl">
           Every forecast is stored. When Wise publishes the real rate for that day, the miss (delta) is written to a
-          learning table. Each run, the last {s?.windowDays ?? 60} days of misses set how much each model is trusted at
-          each forecast horizon. They also set a bias correction, which is switched on only when it has actually
-          reduced errors.
+          learning table. Each run, the last {s?.windowDays ?? 180} days of misses are used to test every model, and the
+          bias correction, against the random walk (&ldquo;tomorrow = today&rdquo;) at each horizon. Only those that are
+          significantly better get a share of the forecast; the rest are still scored daily and switch on by
+          themselves once they earn it. If none qualifies, the forecast is the random walk, which is the honest
+          answer for exchange rates most of the time.
         </p>
       </div>
 
@@ -579,7 +601,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                     <td className="py-1.5 text-ink-2">{MODEL_LABELS[m] ?? m}</td>
                     {s.buckets.map((b) => (
                       <td key={b.bucket} className="py-1.5 text-right">
-                        <WeightCell w={b.weights[m]} mae={b.mae[m]} shadow={b.promoted?.[m] === false} />
+                        <WeightCell w={b.weights[m]} mae={b.mae[m]} unused={b.promoted?.[m] === false} />
                       </td>
                     ))}
                   </tr>
@@ -609,14 +631,14 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
   );
 }
 
-function WeightCell({ w, mae, shadow }: { w: number; mae: number | null; shadow?: boolean }) {
-  if (shadow) {
+function WeightCell({ w, mae, unused }: { w: number; mae: number | null; unused?: boolean }) {
+  if (unused) {
     return (
       <span
         className="text-xs text-ink-3"
-        title={`scored but not used until it beats the random walk${mae == null ? "" : ` · avg miss ${mae.toFixed(3)}%`}`}
+        title={`scored daily, not used until it is significantly better than the random walk${mae == null ? "" : ` · avg miss ${mae.toFixed(3)}%`}`}
       >
-        shadow
+        not used
       </span>
     );
   }

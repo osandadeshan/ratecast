@@ -1,17 +1,30 @@
-import { BACKFILL_DAYS, LEARNING_WINDOW_DAYS, MACRO_FACTORS, MAX_HORIZON, TARGETS, type Target } from "./config";
+import {
+  BACKFILL_DAYS,
+  CROSS_LEGS,
+  FACTOR_LAGS,
+  LEARNING_WINDOW_DAYS,
+  MAX_HORIZON,
+  PREDICT_ORDER,
+  REPLAY_BUDGET_MS,
+  TARGETS,
+  type Target,
+} from "./config";
 import { addDays, todayISO } from "./dates";
 import { db, ensureSchema } from "./db";
+import { detectNonTradingDow } from "./predict/calendar";
 import { forecast, type PredictionRow } from "./predict/engine";
 import { type EventRecord, learnEventVol } from "./predict/events";
 import { learnNewsDrift } from "./predict/news";
-import { type ErrorRecord, learn } from "./predict/learning";
+import { ErrorIndex, type ErrorRecord, learn } from "./predict/learning";
 import { fetchAllEvents, fetchOutcomes } from "./sources/events";
 import { fetchBrent, fetchTreasury2y } from "./sources/macro";
 import { fetchCrossChecks, fetchUsdBasket } from "./sources/market";
+import { SRI_LANKA_SERIES } from "./sources/srilanka";
 import { fetchWiseComparison, fetchWiseHistory } from "./sources/wise";
 
 export interface SyncResult {
-  status: "ok" | "skipped" | "error";
+  /** partial = today's forecast is made but the replay of past days ran out of time; the next run continues. */
+  status: "ok" | "partial" | "skipped" | "error";
   runDate: string;
   log: string[];
   ms: number;
@@ -74,8 +87,8 @@ export async function runSync(): Promise<SyncResult> {
     await ingestMacro(today, log);
 
     // 1b. Policy event calendars (Fed, CBSL). Failures are logged + recorded, never fatal.
-    await ingestEvents(log);
-    await classifyOutcomes(today, log);
+    const okSources = await ingestEvents(log);
+    await classifyOutcomes(today, log, okSources);
 
     // 2. Per-currency ingest
     for (const target of TARGETS) {
@@ -86,9 +99,11 @@ export async function runSync(): Promise<SyncResult> {
     const evaluated = await evaluatePredictions();
     log.push(`evaluated ${evaluated} predictions`);
 
-    // 4. Replay missed days (first run = BACKFILL_DAYS), then forecast from today
-    for (const target of TARGETS) {
-      await predictCurrency(target, today, log);
+    // 4. Replay missed days (first run = BACKFILL_DAYS) within the time budget, then forecast from today
+    const deadline = t0 + REPLAY_BUDGET_MS;
+    let partial = false;
+    for (const target of PREDICT_ORDER) {
+      if (await predictCurrency(target, today, log, deadline)) partial = true;
     }
     const evaluated2 = await evaluatePredictions();
     if (evaluated2) log.push(`evaluated ${evaluated2} replayed predictions`);
@@ -97,8 +112,10 @@ export async function runSync(): Promise<SyncResult> {
     await sql`DELETE FROM predictions WHERE target_date < ${addDays(today, -400)}`;
     await sql`DELETE FROM live_quotes WHERE fetched_at < now() - interval '60 days'`;
 
-    await sql`UPDATE sync_runs SET status = 'ok', finished_at = now(), message = ${log.join("\n")} WHERE id = ${run.id}`;
-    return { status: "ok", runDate: today, log, ms: Date.now() - t0 };
+    // 'partial' keeps needsSync() true, so the next page visit or cron run continues the replay.
+    const status = partial ? "partial" : "ok";
+    await sql`UPDATE sync_runs SET status = ${status}, finished_at = now(), message = ${log.join("\n")} WHERE id = ${run.id}`;
+    return { status, runDate: today, log, ms: Date.now() - t0 };
   } catch (e) {
     const msg = (e as Error).stack ?? String(e);
     log.push(`ERROR: ${msg}`);
@@ -119,14 +136,15 @@ async function upsertMarket(rows: { series: string; date: string; value: number 
   }
 }
 
-async function ingestEvents(log: string[]) {
+/** Returns the sources that were scraped successfully in this run. */
+async function ingestEvents(log: string[]): Promise<Set<string>> {
   const sql = db();
   let results;
   try {
     results = await fetchAllEvents();
   } catch (e) {
     log.push(`events failed: ${(e as Error).message}`);
-    return;
+    return new Set();
   }
   // One row per (kind, date); keep the earliest known_since seen.
   const byKey = new Map<string, EventRecord>();
@@ -157,6 +175,7 @@ async function ingestEvents(log: string[]) {
     `events: ${rows.length} rows · ` +
       results.map((r) => `${r.source} ${r.error ? "FAILED (" + r.error + ")" : r.events.length}`).join(", "),
   );
+  return new Set(results.filter((r) => !r.error).map((r) => r.source));
 }
 
 /** Record the outcome of one automatic source in source_health (shown on the dashboard). */
@@ -192,24 +211,44 @@ async function ingestMacro(today: string, log: string[]) {
       run: async () => fetchBrent(addDays(today, (await count("brent")) < 300 ? -800 : -60)),
     },
   ];
-  await Promise.all(
+  // Sri Lanka (CBSL): daily official rates, monthly policy/T-bill rates, remittances, tourism.
+  for (const s of SRI_LANKA_SERIES) {
+    jobs.push({
+      source: s.source,
+      series: s.series,
+      run: async () => s.fetch(addDays(today, (await count(s.series)) < 20 ? -800 : -120)),
+    });
+  }
+  const results = await Promise.all(
     jobs.map(async (j) => {
       try {
         const pts = await j.run();
         await upsertMarket(pts.map((p) => ({ series: j.series, date: p.date, value: p.value })));
         const latest = pts.at(-1)?.date;
-        await recordHealth(j.source, pts.length, undefined, latest ? `latest ${latest}` : undefined);
-        log.push(`${j.series}: ${pts.length} days (latest ${latest})`);
+        log.push(`${j.series}: ${pts.length} points (latest ${latest})`);
+        return { source: j.source, series: j.series, n: pts.length, latest };
       } catch (e) {
-        await recordHealth(j.source, 0, (e as Error).message);
         log.push(`${j.series} failed: ${(e as Error).message}`);
+        return { source: j.source, series: j.series, n: 0, error: (e as Error).message };
       }
     }),
   );
+  // One health row per source; series that share a download (e.g. both CBSL rates) report together.
+  for (const source of [...new Set(results.map((r) => r.source))]) {
+    const rs = results.filter((r) => r.source === source);
+    const failed = rs.filter((r) => r.error);
+    const note = rs.map((r) => (r.error ? `${r.series} failed` : `${r.series} latest ${r.latest}`)).join(" · ");
+    await recordHealth(
+      source,
+      rs.reduce((a, r) => a + r.n, 0),
+      failed.length === rs.length ? failed.map((r) => `${r.series}: ${r.error}`).join("; ") : undefined,
+      note,
+    );
+  }
 }
 
 async function loadFactors(): Promise<Record<string, Map<string, number>>> {
-  const names = MACRO_FACTORS.map((f) => f.series as string);
+  const names = Object.keys(FACTOR_LAGS);
   const rows = await db()`SELECT series, date::text AS date, value FROM market_data WHERE series = ANY(${names})`;
   const out: Record<string, Map<string, number>> = Object.fromEntries(names.map((n) => [n, new Map()]));
   for (const r of rows) out[r.series].set(r.date, r.value);
@@ -218,11 +257,13 @@ async function loadFactors(): Promise<Record<string, Map<string, number>>> {
 
 /** Each factor restricted to what was public at `anchor` (date <= anchor - lagDays). */
 function factorsAt(all: Record<string, Map<string, number>>, anchor: string): Record<string, Map<string, number>> {
-  return Object.fromEntries(MACRO_FACTORS.map((f) => [f.series, restrict(all[f.series], addDays(anchor, -f.lagDays))]));
+  return Object.fromEntries(
+    Object.entries(FACTOR_LAGS).map(([series, lag]) => [series, restrict(all[series], addDays(anchor, -lag))]),
+  );
 }
 
 /** Read each past announcement's own statement and store what was decided (cut / hold / hike). */
-async function classifyOutcomes(today: string, log: string[]) {
+async function classifyOutcomes(today: string, log: string[], okSources: Set<string>) {
   const sql = db();
   const pending = (await loadEvents()).filter(
     (e) => !e.outcome && e.eventDate < today && e.eventDate >= addDays(today, -800),
@@ -231,12 +272,25 @@ async function classifyOutcomes(today: string, log: string[]) {
     await recordHealth("outcomes", 0); // nothing to do is healthy, not stale
     return;
   }
-  const { results, error } = await fetchOutcomes(pending.reverse()); // newest first
+  const { results, missing, error } = await fetchOutcomes(pending.reverse()); // newest first
   for (const r of results) {
     await sql`UPDATE events SET outcome = ${r.outcome}, updated_at = now()
               WHERE kind = ${r.kind} AND event_date = ${r.eventDate} AND outcome IS NULL`;
   }
-  const left = pending.length - results.length;
+  // Phantom events: a scheduled date that passed a week ago without its own statement (meeting
+  // moved or cancelled). Delete it so it is not learned from as a real event; the daily scrape
+  // brings the real date back. CBSL rows only when its list was read successfully in this run.
+  const cutoff = addDays(today, -7);
+  const phantoms = missing.filter(
+    (m) => m.eventDate <= cutoff && (m.kind === "fomc" || (m.kind === "cbsl_policy" && okSources.has("cbsl-mpr"))),
+  );
+  for (const p of phantoms) {
+    await sql`DELETE FROM events WHERE kind = ${p.kind} AND event_date = ${p.eventDate} AND outcome IS NULL`;
+  }
+  if (phantoms.length) {
+    log.push(`events: removed ${phantoms.length} that never happened (${phantoms.map((p) => `${p.kind} ${p.eventDate}`).join(", ")})`);
+  }
+  const left = pending.length - results.length - phantoms.length;
   await recordHealth("outcomes", results.length, error, left ? `${left} statements not read yet` : undefined);
   log.push(
     `outcomes: classified ${results.length}/${pending.length}` +
@@ -263,14 +317,23 @@ async function loadEvents(): Promise<EventRecord[]> {
 async function ingestCurrency(target: Target, today: string, log: string[]) {
   const sql = db();
   const [{ n }] = await sql`SELECT count(*)::int AS n FROM rates_history WHERE currency = ${target} AND source = 'wise'`;
-  const history = n < 300 ? await fetchWiseHistory(target, 2, "year") : await fetchWiseHistory(target, 3, "month");
-  const rows = history.map((h) => ({ currency: target, date: h.date, rate: h.rate, source: "wise" }));
-  for (let i = 0; i < rows.length; i += 1000) {
-    await sql`
-      INSERT INTO rates_history ${sql(rows.slice(i, i + 1000), "currency", "date", "rate", "source")}
-      ON CONFLICT (currency, date) DO UPDATE SET rate = EXCLUDED.rate, source = 'wise', updated_at = now()`;
+  // A failed history fetch must not cost today's forecast: carry on with the stored history.
+  try {
+    const history = n < 300 ? await fetchWiseHistory(target, 2, "year") : await fetchWiseHistory(target, 3, "month");
+    if (!history.length) throw new Error("Wise history returned no points");
+    const rows = history.map((h) => ({ currency: target, date: h.date, rate: h.rate, source: "wise" }));
+    for (let i = 0; i < rows.length; i += 1000) {
+      await sql`
+        INSERT INTO rates_history ${sql(rows.slice(i, i + 1000), "currency", "date", "rate", "source")}
+        ON CONFLICT (currency, date) DO UPDATE SET rate = EXCLUDED.rate, source = 'wise', updated_at = now()`;
+    }
+    const latest = history.at(-1)?.date;
+    await recordHealth(`wise-history:${target}`, rows.length, undefined, `latest ${latest}`);
+    log.push(`${target}: ${rows.length} history days (latest ${latest})`);
+  } catch (e) {
+    await recordHealth(`wise-history:${target}`, 0, (e as Error).message);
+    log.push(`${target}: history failed, using stored rates: ${(e as Error).message}`);
   }
-  log.push(`${target}: ${rows.length} history days (latest ${history.at(-1)?.date})`);
 
   try {
     const q = await fetchWiseComparison(target);
@@ -291,7 +354,15 @@ async function ingestCurrency(target: Target, today: string, log: string[]) {
 
 /** Insert a prediction_errors row for every prediction whose actual (official Wise) rate exists. */
 async function evaluatePredictions(): Promise<number> {
-  const rows = await db()`
+  // When prediction_errors is (nearly) empty, e.g. right after the first replay, Postgres estimates the
+  // anti-join side at ~1 row and picks a nested loop that rescans it for every prediction: 13 min for
+  // 454k rows on 2026-11-12, against 8 s with a hash anti-join. ANALYZE alone doesn't fix it (an empty
+  // table stays "1 row"), so the statement runs in a transaction with nested loops disabled.
+  const sql = db();
+  await sql`ANALYZE predictions, prediction_errors, rates_history`;
+  const rows = await sql.begin(async (tx) => {
+    await tx`SET LOCAL enable_nestloop = off`;
+    return tx`
     INSERT INTO prediction_errors
       (prediction_id, currency, model, made_on, target_date, horizon, predicted, actual, delta, pct_error, log_error)
     SELECT p.id, p.currency, p.model, p.made_on, p.target_date, p.horizon, p.predicted, r.rate,
@@ -303,6 +374,7 @@ async function evaluatePredictions(): Promise<number> {
     WHERE NOT EXISTS (SELECT 1 FROM prediction_errors e WHERE e.prediction_id = p.id)
     ON CONFLICT (prediction_id) DO NOTHING
     RETURNING prediction_id`;
+  });
   return rows.length;
 }
 
@@ -363,13 +435,57 @@ async function insertPredictions(target: Target, rows: PredictionRow[], overwrit
   }
 }
 
-async function predictCurrency(target: Target, today: string, log: string[]) {
+/** Returns true if the replay ran out of time (the next run continues from the first missing day). */
+/**
+ * For a two-part pair (SGD→LKR): the legs' stored `ensemble` forecasts, so the `cross` model can
+ * combine them. Returns a lookup (anchor date, the legs' anchor rates) → summed log moves per horizon.
+ * Legs are forecast first in a sync (PREDICT_ORDER), so their rows for the same anchor already exist.
+ */
+async function loadLegs(target: Target, today: string) {
+  const legs = CROSS_LEGS[target];
+  if (!legs) return null;
+  const data = await Promise.all(
+    legs.map(async (leg) => {
+      const rows = await db()`
+        SELECT made_on::text AS made_on, horizon, predicted FROM predictions
+        WHERE currency = ${leg} AND model = 'ensemble' AND made_on >= ${addDays(today, -BACKFILL_DAYS - 1)}`;
+      const byDay = new Map<string, number[]>();
+      for (const r of rows) {
+        const arr = byDay.get(r.made_on) ?? [];
+        arr[r.horizon - 1] = r.predicted;
+        byDay.set(r.made_on, arr);
+      }
+      return { byDay, rates: await loadRates(leg) };
+    }),
+  );
+  /** anchorRate(leg index) = the rate that leg's forecast was anchored on at `t`. */
+  return (t: string, live: boolean): number[] | undefined => {
+    const moves = new Array<number>(MAX_HORIZON).fill(0);
+    for (const d of data) {
+      const path = d.byDay.get(t);
+      const src = live ? restrict(d.rates.all, t) : d.rates.official;
+      let anchor = src.get(t);
+      if (anchor === undefined && live) anchor = [...src.entries()].sort((a, b) => a[0].localeCompare(b[0])).at(-1)?.[1];
+      if (!path || !anchor) return undefined;
+      for (let h = 1; h <= MAX_HORIZON; h++) {
+        if (!path[h - 1]) return undefined;
+        moves[h - 1] += Math.log(path[h - 1] / anchor);
+      }
+    }
+    return moves;
+  };
+}
+
+async function predictCurrency(target: Target, today: string, log: string[], deadline: number): Promise<boolean> {
   const sql = db();
   const { all, official } = await loadRates(target);
   const basket = await loadBasket();
   const events = await loadEvents();
   const factors = await loadFactors();
-  const errors = await loadErrors(target, addDays(today, -(BACKFILL_DAYS + LEARNING_WINDOW_DAYS + MAX_HORIZON)));
+  const legsAt = await loadLegs(target, today);
+  const index = new ErrorIndex(
+    await loadErrors(target, addDays(today, -(BACKFILL_DAYS + LEARNING_WINDOW_DAYS + MAX_HORIZON))),
+  );
 
   // Which past days have no forecast yet? (first run, or days the cron didn't fire)
   const madeRows = await sql`
@@ -378,37 +494,53 @@ async function predictCurrency(target: Target, today: string, log: string[]) {
   const made = new Set(madeRows.map((r) => r.d as string));
 
   let replayed = 0;
+  let partial = false;
+  let buffer: PredictionRow[] = [];
+  const flush = async () => {
+    await insertPredictions(target, buffer, false);
+    buffer = [];
+  };
+  // Oldest first: each replayed day learns from the outcomes of the days before it.
   for (let t = addDays(today, -BACKFILL_DAYS); t < today; t = addDays(t, 1)) {
     if (made.has(t) || !official.has(t)) continue;
+    if (Date.now() > deadline) {
+      partial = true;
+      break;
+    }
     // Strictly no look-ahead: only data known at day t.
-    const stats = learn(errors, t);
+    const ratesAtT = restrict(official, t);
+    const stats = learn(index, t, { nonTradingDow: detectNonTradingDow(ratesAtT, t) });
     const known = events.filter((e) => e.knownSince <= t);
-    const eventStats = learnEventVol(restrict(official, t), known, t);
-    const newsStats = learnNewsDrift(restrict(official, t), known, t);
     const rows = forecast({
-      rates: restrict(official, t),
+      rates: ratesAtT,
       basket: restrict(basket, addDays(t, -1)),
       factors: factorsAt(factors, t),
       anchorDate: t,
       stats,
       events: known,
-      eventStats,
-      newsStats,
+      eventStats: learnEventVol(ratesAtT, known, t),
+      newsStats: learnNewsDrift(ratesAtT, known, t),
+      pair: target,
+      legMoves: legsAt?.(t, false),
     });
-    await insertPredictions(target, rows, false);
+    buffer.push(...rows);
+    if (buffer.length >= 5000) await flush();
     // Feed outcomes back immediately so the next replayed day learns from them.
     for (const r of rows) {
       const actual = official.get(r.targetDate);
       if (actual && r.targetDate < today) {
-        errors.push({ model: r.model, horizon: r.horizon, targetDate: r.targetDate, logError: Math.log(r.predicted / actual) });
+        index.add({ model: r.model, horizon: r.horizon, targetDate: r.targetDate, logError: Math.log(r.predicted / actual) });
       }
     }
     replayed++;
   }
-  if (replayed) log.push(`${target}: replayed ${replayed} past days`);
+  await flush();
+  if (replayed) log.push(`${target}: replayed ${replayed} past days${partial ? " (time budget reached, continues next run)" : ""}`);
+  else if (partial) log.push(`${target}: replay postponed (time budget reached)`);
 
   // Today's live forecast — anchored on the freshest rate we have (live Wise quote).
-  const stats = learn(errors, today);
+  const officialToday = restrict(official, today);
+  const stats = learn(index, today, { nonTradingDow: detectNonTradingDow(officialToday, today) });
   const anchorRates = restrict(all, today);
   if (!anchorRates.has(today)) {
     // No live quote today: carry yesterday's official rate forward as the anchor.
@@ -416,17 +548,19 @@ async function predictCurrency(target: Target, today: string, log: string[]) {
     if (prev) anchorRates.set(today, anchorRates.get(prev)!);
   }
   const known = events.filter((e) => e.knownSince <= today);
-  stats.events = learnEventVol(restrict(official, today), known, today);
-  stats.news = learnNewsDrift(restrict(official, today), known, today);
+  stats.events = learnEventVol(officialToday, known, today);
+  stats.news = learnNewsDrift(officialToday, known, today);
   const rows = forecast({
     rates: anchorRates,
-    basket: restrict(basket, today),
+    basket: restrict(basket, addDays(today, -1)), // same rule as the replay: ECB basket < anchor
     factors: factorsAt(factors, today),
     anchorDate: today,
     stats,
     events: known,
     eventStats: stats.events,
     newsStats: stats.news,
+    pair: target,
+    legMoves: legsAt?.(today, true),
   });
   await insertPredictions(target, rows, true);
   await sql`
@@ -434,4 +568,5 @@ async function predictCurrency(target: Target, today: string, log: string[]) {
     ON CONFLICT (currency, as_of) DO UPDATE SET stats = EXCLUDED.stats`;
   const tomorrow = rows.find((r) => r.model === "ensemble" && r.horizon === 1);
   log.push(`${target}: forecast ${rows.length} rows, tomorrow ≈ ${tomorrow?.predicted.toFixed(4)}`);
+  return partial;
 }

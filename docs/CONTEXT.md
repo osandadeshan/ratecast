@@ -102,7 +102,7 @@ automated yet: no reachable source in the survey above.
 | Drift shrunk toward 0 by 8 pseudo-events, needs ≥ 3 events per category, and `news` starts in shadow | categories have 1–11 events; anything less conservative would fit noise |
 
 ## Backtest results
-Replay of 90 days, scored on forecasts made in the last 60 days. Average |% miss|, `ensemble` vs `naive`.
+Until 2026-11-12: replay of 90 days, scored on forecasts made in the last 60 days. Average |% miss|, `ensemble` vs `naive`.
 
 | date | currency | 1 day | 2–7 days | 8–14 days | 15–31 days |
 |---|---|---|---|---|---|
@@ -169,11 +169,35 @@ What this means: next-day forecasts match the random walk, which is about as goo
 USD long horizons are currently worse than the random walk, because trend models were rewarded in an earlier
 regime. The learner should shift weight to `naive`/`holt` over time. Watch this.
 
+**2026-11-13 · audit fixes, USD→LKR, CBSL data, gating by significance.** New method: 365-day replay, 180-day
+learning window, Sundays excluded from scoring (Wise's Sunday point repeats Saturday's), scored on forecasts made
+in the last 300 days. Average |% miss|, `ensemble` / `naive`:
+
+| pair | 1 day | 2–7 days | 8–14 days | 15–31 days |
+|---|---|---|---|---|
+| SGD→LKR | 0.2735 / 0.2735 | 0.4413 / 0.4413 | 0.6269 / 0.6269 | 0.9322 / 0.9322 |
+| SGD→USD | 0.1636 / 0.1636 | 0.3037 / 0.3037 | 0.4530 / 0.4530 | 0.6280 / 0.6280 |
+| USD→LKR | 0.1788 / 0.1788 | 0.3382 / 0.3382 | 0.5595 / 0.5595 | 1.0087 / 1.0087 |
+
+- Before the gate, the ensemble was **worse** than the random walk in every bucket (e.g. SGD→USD 15–31d
+  +15%). Now no model passes the significance test (t < −2.6) in any bucket, so the ensemble equals the random
+  walk: no longer worse, not better. Honest result: over a year, no model here reliably beats "no change".
+- Best candidates, MAE vs naive: `cbsl_gap` SGD→LKR 8–14d −2.3%, 2–7d −0.4%, 15–31d −0.5% (but +2–7% worse
+  for USD→LKR); `mean_reversion` SGD→LKR 1d −0.3%; `macro` USD→LKR 15–31d −0.9%. None is significant yet.
+  They keep being scored daily and are promoted automatically if the evidence builds.
+- `cbsl_gap` evidence: in a fit-before-March / test-after split, Wise's gap to CBSL's fixing cut SGD→LKR 7-day
+  error by 5.7% out of sample. Within the rolling replay the gain is smaller (−2.3% at 8–14d).
+- 80% band coverage (last 180 days): SGD→USD ~90% at every horizon, USD→LKR 78–82%, SGD→LKR 85–96%. Bands are
+  now percentile-based per bucket instead of RMS.
+- Scoring speed: the first scoring after a full replay took 13 min (nested-loop anti-join on an empty
+  `prediction_errors`); with `enable_nestloop = off` for that statement, 8 s. Full first sync locally: 54 s.
+
 ## Known limitations / risks
 - **Wise may block Vercel IPs** (untested at the time of writing). The live quote and sync would fail; check
   with the `verify-deploy` skill.
 - Wise endpoints are undocumented/public and could change shape without notice.
-- Weekends: Wise history repeats Friday's value, which inflates "perfect" 1-day hits on weekends.
+- Weekends: Wise's Sunday point repeats Saturday's. Fixed 2026-11-12: such weekdays are detected (`calendar.ts`),
+  forecasts stay flat across them, and they're excluded from learning.
 - "Today" uses Singapore time, while Wise daily points are UTC-midnight snapshots (08:00 SGT).
 - Accuracy stats on the page include the replayed backtest period until real days replace them (~60 days).
 - **Event scrapers are fragile.** The Fed page, CBSL list and CBSL PDF wording can change. A broken source shows
@@ -202,8 +226,15 @@ regime. The learner should shift weight to `naive`/`holt` over time. Watch this.
 - **Outcome classifiers are fragile.** They depend on the FOMC statement phrase "decided to … target range" and
   the CBSL PDF headline wording. Unparsable statements are stored as `unclear` (no drift learned from them);
   fetch failures show on the `outcomes` health row.
-- **Pre-existing quirk (not fixed):** the live forecast uses the ECB basket `<= today`, while replay uses
-  `< t` (invariant 1 says `< t`). Harmless in practice (ECB publishes ~16:00 CET), but inconsistent.
+- ~~Live forecast used the ECB basket `<= today`~~: fixed, live and replay both use `< anchor`.
+- **No model beats the random walk yet** (2026-11-13). The forecast equals "no change" in every bucket. That
+  is the honest floor; candidates (`cbsl_gap`, `mean_reversion`, `macro`) are promoted automatically if
+  they become significantly better.
+- **USD→LKR 1-day band covers 78%** (target 80%; 2–31 days are 81–82%). Watch it.
+- **CBSL reserves / net USD purchases aren't ingested.** They're only in a weekly PDF the dependency-free
+  PDF reader can't extract text from.
+- **CBSL monthly tables are published 1–2 months late**, so policy-rate, T-bill, remittance and tourism
+  inputs are lagged 45–60 days and can only explain slow drifts.
 
 ## Ideas backlog (not started)
 - **Light refresh** (discussed 2026-11-09): at most hourly on page view, re-run only the forecast step from the

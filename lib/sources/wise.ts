@@ -1,4 +1,4 @@
-import { BASE, type Target } from "../config";
+import { PAIRS, type Target } from "../config";
 import { toISO, todayISO } from "../dates";
 import { getJSON } from "./http";
 
@@ -20,7 +20,8 @@ export async function fetchWiseHistory(
   length: number,
   unit: "day" | "month" | "year" = "month",
 ): Promise<DailyRate[]> {
-  const url = `https://wise.com/rates/history?source=${BASE}&target=${target}&length=${length}&unit=${unit}&resolution=daily`;
+  const { base, quote } = PAIRS[target];
+  const url = `https://wise.com/rates/history?source=${base}&target=${quote}&length=${length}&unit=${unit}&resolution=daily`;
   const data = await getJSON<WiseHistoryPoint[]>(url);
   const byDate = new Map<string, number>();
   for (const p of data) {
@@ -70,8 +71,8 @@ interface WiseComparison {
 /** Today's rate plus a comparison against other providers (Wise comparisons API). */
 export async function fetchWiseComparison(target: Target, sendAmount = 1000): Promise<LiveQuote> {
   const url =
-    `https://wise.com/gateway/v4/comparisons?sendAmount=${sendAmount}&sourceCurrency=${BASE}` +
-    `&targetCurrency=${target}&filter=POPULAR&includeWise=true&numberOfProviders=3` +
+    `https://wise.com/gateway/v4/comparisons?sendAmount=${sendAmount}&sourceCurrency=${PAIRS[target].base}` +
+    `&targetCurrency=${PAIRS[target].quote}&filter=POPULAR&includeWise=true&numberOfProviders=3` +
     `&sourceCountry=SG&payInMethod=BANK_TRANSFER`;
   const data = await getJSON<WiseComparison>(url);
 

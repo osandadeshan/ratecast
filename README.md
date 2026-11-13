@@ -1,12 +1,15 @@
 # RateCast
 
-**SGD → LKR / USD exchange-rate forecasts that learn from their own misses.**
+**SGD → LKR, SGD → USD and USD → LKR exchange-rate forecasts that learn from their own misses.**
 
 🔗 **Live:** https://ratecast.vercel.app · No login · Runs entirely on free tiers
 
-RateCast shows today's Singapore-dollar rates from Wise and a full-month view: past days show the actual
+RateCast shows today's SGD → LKR, SGD → USD and USD → LKR rates from Wise and a full-month view: past days show the actual
 rate, future days show a forecast. Every forecast is stored. Once the real rate is published, the miss is
-recorded, and those misses decide how future forecasts are made.
+recorded, and those misses decide how future forecasts are made. Inputs are fetched automatically from
+Wise, the ECB, the US Treasury, FRED (Brent), the Federal Reserve and the Central Bank of Sri Lanka (official
+USD/LKR and SGD/LKR fixings, policy rate, T-bill yield, remittances, tourism, policy-review calendar). A model
+only gets weight once it is statistically better than the random walk ("no change").
 
 ---
 
@@ -183,7 +186,7 @@ flowchart TD
 | **1b. Policy events** | Fed page + JSON, CBSL review list + latest PDF, CBSL RSS; then each past event's own statement (FOMC HTML, CBSL review PDF) | `events` (incl. `outcome`), `source_health` (incl. `outcomes`) | Each source fails on its own: a failure is logged and recorded in `source_health`, never fails the sync. Outcomes: past events with no outcome (last ~800 days), newest first, at most 32 statements per run |
 | **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes` | History rows are `source='wise'` (official). Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it |
 | **3. Score** | `predictions` + official `rates_history` | `prediction_errors` | For each forecast: predicted, actual, delta = actual − predicted, % miss. Only official rates count as "actual" |
-| **4. Fill gaps** | stored rates, errors | `predictions` | On first deploy this replays all 90 days, so the learner starts with real statistics. Afterwards it only fills days the cron missed |
+| **4. Fill gaps** | stored rates, errors | `predictions` | On first deploy this replays 365 days (40 s per run, resumed on the next run until done), so the learner starts with real statistics. Afterwards it only fills days the cron missed |
 | **5. Learn + forecast** | rates, ECB series, macro factors, errors, events + outcomes | `model_stats`, `predictions` | 8 models × 31 days ahead, blended with learned weights (`macro` and `news` are in shadow: scored, weight 0 until they beat the random walk). Known events widen the 80% range (step 4's replay does the same, using only events public on each day). Re-running on the same day overwrites that day's forecast |
 | **6. Housekeeping** | | `sync_runs` | Deletes predictions older than ~400 days and quotes older than 60 days, to stay within Neon's free 0.5 GB |
 
@@ -533,7 +536,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://<your-app>.vercel.app/api/cron/
 docker run -d --name ratecast-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=rates -p 54329:5432 postgres:16-alpine
 echo 'DATABASE_URL=postgres://postgres:dev@localhost:54329/rates' > .env.local
 npm install
-npm run sync      # download history, replay 90 days, forecast
+npm run sync      # download history, replay 365 days, forecast
 npm run dev       # http://localhost:3000
 ```
 

@@ -19,6 +19,13 @@ const treasuryUrl = (year: number) =>
 
 const fredUrl = (id: string, start: string) => `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${id}&cosd=${start}`;
 
+/**
+ * home.treasury.gov delays any request whose User-Agent contains a "+https://…" bot-style URL by
+ * ~18 s (measured 2026-11-11: the app's default UA took 17–19 s, this plain one ~0.4 s, same
+ * 200 response). A plain client name is still honest, so Treasury alone gets this override.
+ */
+const TREASURY_REQUEST = { userAgent: "RateCast/1.0", accept: "text/csv,*/*;q=0.8", timeoutMs: 40_000 };
+
 /** Split one CSV line (Treasury quotes header cells). */
 const cells = (line: string) => line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
 
@@ -39,9 +46,9 @@ export function parseTreasuryCsv(csv: string, column = "2 Yr"): Point[] {
 }
 
 export async function fetchTreasury2y(years: number[]): Promise<Point[]> {
-  // One year at a time: home.treasury.gov is slow (several seconds per CSV) and dislikes bursts.
+  // One year at a time, to stay polite to home.treasury.gov.
   const out: Point[] = [];
-  for (const y of years) out.push(...parseTreasuryCsv(await getText(treasuryUrl(y), 40_000)));
+  for (const y of years) out.push(...parseTreasuryCsv(await getText(treasuryUrl(y), TREASURY_REQUEST)));
   if (!out.length) throw new Error("Treasury CSV: no '2 Yr' values (layout changed?)");
   return out;
 }

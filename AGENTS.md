@@ -10,7 +10,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 # RateCast: guide for coding agents
 
-RateCast is a no-login Next.js app on Vercel. It shows today's **SGD → LKR** and **SGD → USD** Wise rates and a
+RateCast is a no-login Next.js app on Vercel. It shows today's **SGD → LKR**, **SGD → USD** and **USD → LKR** Wise rates and a
 month view: past days show the actual rate, future days show a forecast. Forecasts come from several models
 whose blend **learns from its own misses**. The rules below apply to every agent (Claude Code, Codex, Cursor,
 …). Deeper references: `docs/ARCHITECTURE.md` (how it works) and `docs/CONTEXT.md` (why, requirements,
@@ -47,10 +47,13 @@ lib/dates.ts                  YYYY-MM-DD string date math (UTC-based)
 lib/db.ts                     postgres.js client + idempotent CREATE TABLE IF NOT EXISTS schema
 lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks),
                               macro (US Treasury 2y yield CSV, FRED Brent CSV),
+                              srilanka (+ srilanka-xlsx: CBSL daily USD/LKR + SGD/LKR fixing, policy rate,
+                              3m T-bill, remittances, tourism; dependency-free .xlsx reader),
                               events (Fed FOMC page + JSON, CBSL review list + PDF, CBSL RSS,
                               decision outcomes read from each FOMC statement / CBSL review PDF),
                               pdf (dependency-free PDF text via node:zlib), http (getJSON/getText/getBytes)
-lib/predict/                  series helpers, models (incl. `macro` + SHADOW_MODELS), learning (weights/bias/
+lib/predict/                  series helpers, calendar (detects non-trading weekdays, e.g. Sundays),
+                              models (incl. `macro`, `lanka`, `cross` + SHADOW_MODELS), learning (weights/bias/
                               sigma/shadow promotion), events (event-day
                               volatility + band widening), news (post-announcement drift for the
                               shadow `news` model), engine (forecast)
@@ -66,7 +69,7 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
    on this.
 2. **Actuals are official only.** `prediction_errors` is filled only from `rates_history.source = 'wise'`.
    Today's live quote is stored as `source = 'wise_live'` (provisional) and is overwritten by Wise's daily point.
-3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news`
+3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross`
    plus the derived `blend` (raw weighted), `blend_bc` (blend with bias correction, always stored as the
    counterfactual) and `ensemble` (the final number shown to users). Renaming a model orphans its history.
 4. **Schema changes are additive.** `ensureSchema()` runs `CREATE ... IF NOT EXISTS` on every cold start. There
@@ -90,10 +93,19 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
    - Each factor in `MACRO_FACTORS` has a `lagDays` (`ust2y` 1, `brent` 9: FRED's Brent runs ~1 week late).
      Replay and live both see only `date <= anchor - lagDays` (`factorsAt` in `lib/sync.ts`). Don't use a
      factor value the 09:30 SGT sync couldn't have had.
-   - Every model built on new external data goes into `SHADOW_MODELS` first (now `macro` and `news`). It's run and scored daily but
-     gets weight 0, and is left out of the pooled MAE, until in that horizon bucket it has ≥ 30 distinct
-     target dates and MAE < 0.98 × the random walk's. Promotion is automatic (`BucketStats.promoted`).
-8. **Dates are `YYYY-MM-DD` strings.** "Today" is Singapore time (`todayISO()`). Wise history points are UTC
+   - `LANKA_FACTORS` (CBSL series) follow the same rule: daily fixings lag 1 day, policy rate / T-bill 60,
+     remittances / tourism 45 (monthly tables are published 1–2 months late).
+   - **Every model except `naive` is gated** (`learning.ts`): it gets weight 0 in a horizon bucket until it has
+     ≥ 30 distinct target dates there and beats the random walk by a paired t-test on per-date |error|
+     (overlap-adjusted n, t < −2.6, Bonferroni for ~10 candidates). The bias correction passes the same
+     test against `blend`. Promotion is automatic (`BucketStats.promoted`). `SHADOW_MODELS` (`macro`, `news`,
+     `lanka`, `cross`) only marks models built on external data for the UI. Never loosen the bar to get a model in.
+   - Non-trading weekdays (Sunday's Wise point repeats Saturday's) are detected from the data
+     (`calendar.ts`): forecasts stay flat across them and their target dates are left out of learning.
+8. **Pairs are data, and SGD→LKR is also forecast in two parts.** `TARGETS` ids (`LKR`, `USD`, `USDLKR`) are
+   stored in every table: never rename. `PREDICT_ORDER` forecasts the legs (SGD→USD, USD→LKR) first so the
+   `cross` model for SGD→LKR can use their `ensemble` forecasts made on the same anchor day.
+9. **Dates are `YYYY-MM-DD` strings.** "Today" is Singapore time (`todayISO()`). Wise history points are UTC
    midnight. Select dates as `date::text` and never pass JS `Date` objects for `date` columns.
 
 ## Conventions

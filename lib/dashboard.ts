@@ -1,5 +1,5 @@
 import { cacheLife } from "next/cache";
-import { DECIMALS, HORIZON_BUCKETS, MACRO_FACTORS, TARGETS, type Target, bucketOf } from "./config";
+import { DECIMALS, HORIZON_BUCKETS, MACRO_FACTORS, PAIRS, SRI_LANKA_META, TARGETS, type Target, bucketOf } from "./config";
 import { addDays, addMonths, dateRange, monthBounds, todayISO } from "./dates";
 import { db, ensureSchema, hasDb } from "./db";
 import { EVENT_KINDS, type EventKind } from "./predict/events";
@@ -61,6 +61,11 @@ export interface AccuracyRow {
 
 export interface CurrencyDashboard {
   target: Target;
+  /** "SGD", "USD": the currency you send. */
+  base: string;
+  /** "LKR", "USD": the currency received. */
+  quote: string;
+  label: string; // "SGD → LKR"
   decimals: number;
   live: LiveQuote | null;
   liveSource: "wise-live" | "db" | "none";
@@ -88,7 +93,18 @@ export interface Dashboard {
   currencies: CurrencyDashboard[];
   events: { upcoming: EventView[]; recent: EventView[]; health: SourceHealthView[] };
   /** Latest macro factor values (inputs of the `macro` model). change30d: pp for yields, % for prices. */
-  macro: { series: string; label: string; value: number; date: string; change30d: number | null; unit: "pp" | "%" }[];
+  macro: {
+    series: string;
+    label: string;
+    value: number;
+    date: string;
+    change30d: number | null;
+    unit: "pp" | "%";
+    /** Sri Lanka series: shown only on LKR pairs. */
+    lanka: boolean;
+    /** Display format of the level. */
+    format: "pct" | "usd" | "lkr" | "usdmn";
+  }[];
 }
 
 const STALE_DAYS = 3;
@@ -99,6 +115,12 @@ const SOURCE_LABEL: Record<string, string> = {
   "cbsl-rss": "CBSL press releases (RSS)",
   treasury: "US Treasury yield curve",
   "fred-brent": "FRED Brent oil price",
+  "cbsl-fx": "CBSL official exchange rates",
+  "cbsl-rates": "CBSL policy rate and T-bill yields",
+  "cbsl-external": "CBSL remittances and tourism",
+  "wise-history:LKR": "Wise SGD → LKR history",
+  "wise-history:USD": "Wise SGD → USD history",
+  "wise-history:USDLKR": "Wise USD → LKR history",
   outcomes: "Decision outcomes (statements)",
 };
 
@@ -172,23 +194,39 @@ export async function getDashboard(): Promise<Dashboard> {
         ORDER BY event_date`,
     sql`SELECT source, last_ok_at, last_error_at, last_error, last_note FROM source_health ORDER BY source`,
     sql`SELECT series, date::text AS date, value FROM market_data
-        WHERE series = ANY(${MACRO_FACTORS.map((f) => f.series as string)}) AND date >= ${addDays(today, -75)}
+        WHERE series = ANY(${[...MACRO_FACTORS, ...SRI_LANKA_META].map((f) => f.series as string)})
+          AND date >= ${addDays(today, -500)}
         ORDER BY date`,
   ]);
   const macro: Dashboard["macro"] = [];
-  for (const f of MACRO_FACTORS) {
+  const FORMAT: Record<string, Dashboard["macro"][number]["format"]> = {
+    brent: "usd",
+    lk_usd_spot: "lkr",
+    lk_sgd_ind: "lkr",
+    lk_remit: "usdmn",
+    lk_tourism: "usdmn",
+  };
+  const factorList = [
+    ...MACRO_FACTORS.map((f) => ({ series: f.series as string, label: f.label as string, transform: f.transform as string, lanka: false })),
+    ...SRI_LANKA_META.map((f) => ({ series: f.series as string, label: f.label as string, transform: f.transform as string, lanka: true })),
+  ];
+  for (const f of factorList) {
     const pts = macroRows.filter((r) => r.series === f.series);
     const latest = pts.at(-1);
     if (!latest) continue;
-    const ref = [...pts].reverse().find((p) => p.date <= addDays(latest.date, -30));
+    // Monthly flows are seasonal: compare with a year earlier. Everything else: ~30 days earlier.
+    const yoy = f.series === "lk_remit" || f.series === "lk_tourism";
+    const ref = [...pts].reverse().find((p) => p.date <= addDays(latest.date, yoy ? -360 : -30));
     const change30d = !ref ? null : f.transform === "diff" ? latest.value - ref.value : (latest.value / ref.value - 1) * 100;
     macro.push({
       series: f.series,
-      label: f.label,
+      label: yoy ? `${f.label} · vs a year earlier` : f.label,
       value: latest.value,
       date: latest.date,
       change30d,
       unit: f.transform === "diff" ? "pp" : "%",
+      lanka: f.lanka,
+      format: FORMAT[f.series] ?? "pct",
     });
   }
   const evs = eventRows.map((r) => eventView(r as never));
@@ -227,9 +265,15 @@ export async function getDashboard(): Promise<Dashboard> {
   };
 }
 
+const pairInfo = (t: Target) => ({ base: PAIRS[t].base, quote: PAIRS[t].quote, label: PAIRS[t].label });
+
+/** CBSL's own fixing for this pair, shown as a cross-check (LKR pairs only). */
+const CBSL_SERIES: Partial<Record<Target, string>> = { LKR: "lk_sgd_ind", USDLKR: "lk_usd_spot" };
+
 function emptyCurrency(target: Target, live: LiveQuote | null, start: string, end: string, today: string): CurrencyDashboard {
   return {
     target,
+    ...pairInfo(target),
     decimals: DECIMALS[target],
     live,
     liveSource: live ? "wise-live" : "none",
@@ -283,14 +327,16 @@ async function currencyDashboard(
         ORDER BY target_date DESC LIMIT 14`,
     sql`SELECT model, horizon, count(*)::int AS n, avg(abs(pct_error)) AS mae,
                avg(CASE WHEN abs(pct_error) <= 0.25 THEN 1 ELSE 0 END) * 100 AS within
+        , extract(dow from target_date)::int AS dow
         FROM prediction_errors
         WHERE currency = ${target} AND model IN ('ensemble', 'naive') AND target_date > ${addDays(today, -60)}
-        GROUP BY model, horizon`,
+        GROUP BY model, horizon, dow`,
     sql`SELECT stats FROM model_stats WHERE currency = ${target} ORDER BY as_of DESC LIMIT 1`,
     sql`SELECT date::text AS date, value FROM market_data
         WHERE series = 'usd_basket' AND date >= ${addDays(today, -40)} ORDER BY date`,
     sql`SELECT series, date::text AS date, value FROM market_data
-        WHERE series LIKE ${"xc:" + target + ":%"} AND date >= ${addDays(today, -3)} ORDER BY date DESC`,
+        WHERE (series LIKE ${"xc:" + target + ":%"} OR series = ${CBSL_SERIES[target] ?? "-"})
+          AND date >= ${addDays(today, -7)} ORDER BY date DESC`,
     liveQuote(target),
     sql`SELECT date::text AS date, mid_rate, providers, fetched_at FROM live_quotes
         WHERE currency = ${target} ORDER BY fetched_at DESC LIMIT 1`,
@@ -373,8 +419,11 @@ async function currencyDashboard(
   const lmRate = rates.get(lmDate);
 
   // accuracy per horizon bucket
+  // Days the market is shut (Sunday on Wise) repeat the day before: scoring them would flatter accuracy.
+  const shut = new Set(((statsRow[0]?.stats as LearnedStats | undefined)?.nonTradingDow ?? [0]) as number[]);
   const agg = new Map<string, { n: number; sumMae: number; sumWithin: number }>();
   for (const r of errAgg) {
+    if (shut.has(r.dow)) continue;
     const key = `${r.model}:${bucketOf(r.horizon)}`;
     const a = agg.get(key) ?? { n: 0, sumMae: 0, sumWithin: 0 };
     a.n += r.n;
@@ -408,7 +457,7 @@ async function currencyDashboard(
   const seen = new Set<string>();
   const crossChecks: CurrencyDashboard["market"]["crossChecks"] = [];
   for (const r of crossRows) {
-    const source = (r.series as string).split(":")[2];
+    const source = (r.series as string).startsWith("xc:") ? (r.series as string).split(":")[2] : "CBSL official";
     if (seen.has(source)) continue;
     seen.add(source);
     crossChecks.push({
@@ -421,6 +470,7 @@ async function currencyDashboard(
 
   return {
     target,
+    ...pairInfo(target),
     decimals: DECIMALS[target],
     live,
     liveSource,

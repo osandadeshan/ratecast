@@ -15,7 +15,8 @@
  CBSL review list/PDF┤  rates_history   prediction_errors  model_stats   predictions ─┘
  CBSL RSS ───────────┤  live_quotes     (the delta table)  (+ event ratios)  (band widened
  US Treasury CSV ────┤  market_data                                           around events)
- FRED Brent CSV ─────┘  (+ ust2y, brent)
+ FRED Brent CSV ─────┤  (+ ust2y, brent,
+ CBSL rates / xlsx ──┘   lk_* Sri Lanka series)
                         events, source_health
                                │
                                ▼
@@ -44,8 +45,15 @@
 4. **Evaluate.** A single INSERT…SELECT joins `predictions` to official `rates_history` rows and writes every
    not-yet-scored prediction to `prediction_errors` with `delta = actual − predicted`,
    `pct_error = (predicted − actual)/actual × 100` and `log_error = ln(predicted/actual)`.
-5. **Replay missed days.** For each day `t` in the last 90 days with no `ensemble` forecast (all 90 on first
-   run, or gaps if the cron missed a day): learn from errors with target ≤ t, forecast from rates ≤ t,
+   Then **Sri Lanka series** (`SRI_LANKA_SERIES` in `lib/sources/srilanka.ts`): CBSL's daily indicative USD/LKR
+   (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) via its rate-lookup form, and monthly policy rate (`lk_opr`),
+   3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`) and tourism earnings (`lk_tourism`) from
+   CBSL's statistical .xlsx tables (read by the dependency-free `srilanka-xlsx.ts`). Health rows `cbsl-fx`,
+   `cbsl-rates`, `cbsl-external`.
+5. **Replay missed days.** Pairs run in `PREDICT_ORDER` (SGD→USD, USD→LKR, then SGD→LKR, whose `cross` model
+   reads the legs' `ensemble` rows for the same anchor). For each day `t` in the last 365 days
+   (`BACKFILL_DAYS`) with no `ensemble` forecast (all of them on first run, or gaps if the cron missed a day),
+   within `REPLAY_BUDGET_MS` (40 s; the rest continues next run): learn from errors with target ≤ t, forecast from rates ≤ t,
    insert, and push the realised errors into memory so day t+1 learns from them. This is a backtest.
 6. **Forecast today.** The anchor is today's live Wise rate (or yesterday's official rate if Wise failed).
    Horizons 1..31. Rows for the same `made_on` are upserted, so re-running on the same day just refreshes them.
@@ -63,26 +71,32 @@
 | `market` | β of the pair's daily returns on the ECB USD basket (90 days) × 10-day basket momentum, damped 0.9^k |
 | `macro` | **shadow model.** Ridge regression of daily returns on the lagged 5-day moves of the US 2y yield and Brent (see below) |
 | `news` | **shadow model.** `naive` plus the learned post-announcement drift for a few days after a classified Fed/CBSL decision (see below) |
+| `lanka` | **shadow model, LKR pairs.** Same ridge factor model on `LANKA_FACTORS`: gap to CBSL's fixing, CBSL's 5-day USD/LKR move, policy rate and T-bill changes, YoY remittances and tourism, each with its own lag |
+| `cross` | **shadow model, SGD→LKR.** Today's rate moved by the summed log forecasts of the legs (SGD→USD `ensemble` + USD→LKR `ensemble`) |
+| `cbsl_gap` | **shadow model, LKR pairs.** Per-horizon no-intercept regression (365 days, shrunk toward 0) of the Wise move over h days on yesterday's gap ln(CBSL fixing / Wise). Wise drifts toward CBSL's own rate |
 
 ## Learning (`lib/predict/learning.ts`)
 
-For each horizon bucket b ∈ {1, 3, 7, 14, 31}, over evaluated errors with target date in (t − 60, t]:
+For each horizon bucket b ∈ {1, 3, 7, 14, 31}, over evaluated errors with target date in (t − 180, t], skipping
+detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturday's):
 
 - `MAE_m` = mean |log error| of model m. Shrunk: `(n·MAE_m + 10·MAE_pooled)/(n + 10)`.
 - `w_m ∝ 1 / MAE_shrunk^4`, normalised. With no data, weights are equal.
 - `blend = Σ w_m · f_m` (log space).
 - `bias` = exponentially recency-weighted (half-life 14 days) mean log error of `blend`, × n/(n + 15).
 - `blend_bc = blend − bias` is always stored, so its accuracy can be measured.
-- `ensemble = blend − bias · biasOn`, where `biasOn = 1` iff b ≤ 7 and n ≥ 20 and MAE(blend_bc) < MAE(blend).
-- **Shadow models** (`SHADOW_MODELS` in `models.ts`, currently `macro` and `news`) are forecast and scored like every
-  model but get `w = 0` in a bucket until **promoted**: scored on ≥ 30 *distinct* target dates in the window
-  and `MAE_m < 0.98 · MAE_naive`. Unpromoted shadow models are also left out of `MAE_pooled`, so they can't
+- `ensemble = blend − bias · biasOn`, where `biasOn = 1` iff b ≤ 7 and `blend_bc` beats `blend` by the paired test below.
+- **Every model except `naive` is gated** (`SHADOW_MODELS` only labels the external-data ones in the UI). A model
+  gets `w = 0` in a bucket until **promoted**: scored on ≥ 30 *distinct* target dates in the window and a paired
+  t-test on per-date mean |error| vs `naive` gives t < −2.6, with n_eff = dates / bucket mean horizon (neighbouring
+  forecasts overlap). 2.6 ≈ Bonferroni for ~10 candidates per bucket at 5% family-wise. Unpromoted shadow models are also left out of `MAE_pooled`, so they can't
   shift the other weights. The flag is stored per bucket in `BucketStats.promoted` and is re-evaluated every
   day, so a model can be promoted and demoted automatically. Distinct dates, not raw counts: long-horizon
   forecasts overlap heavily (17 horizons hit the same few target dates), and a first rule of "≥ 60 forecasts"
   promoted `macro` on thin evidence and hurt LKR 8–31 days.
-- 80% band: `ensemble · exp(±1.2816 σ')`, σ = RMS of ensemble log errors (n ≥ 10), else daily vol × √h, and
-  `σ'² = σ² + event extra variance` (see below). The point forecast never includes events.
+- 80% band: half-width `q80 · √(h / meanH_b)`, where q80 = empirical 80th percentile of the bucket's |ensemble log
+  error| normalised to the bucket's mean horizon (n ≥ 30); fallback 1.2816 × (RMS or daily vol × √h). Event
+  variance is added in quadrature (see below). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
 
 ## Macro factors (`lib/sources/macro.ts`)
 

@@ -212,8 +212,14 @@ const fomcStatementUrl = (date: string) =>
 export async function fetchOutcomes(
   pending: EventRecord[],
   maxFetches = 32,
-): Promise<{ results: { kind: string; eventDate: string; outcome: string }[]; error?: string }> {
+): Promise<{
+  results: { kind: string; eventDate: string; outcome: string }[];
+  /** Events whose own statement does not exist (FOMC 404, CBSL list has no PDF for that date). */
+  missing: { kind: string; eventDate: string }[];
+  error?: string;
+}> {
   const results: { kind: string; eventDate: string; outcome: string }[] = [];
+  const missing: { kind: string; eventDate: string }[] = [];
   const errors: string[] = [];
   for (const e of pending.slice(0, maxFetches)) {
     try {
@@ -222,17 +228,23 @@ export async function fetchOutcomes(
         outcome = classifyFomc(await getText(fomcStatementUrl(e.eventDate)));
       } else if (e.kind === "cbsl_policy") {
         // Only the review's own PDF (file name carries its date), never the previous statement.
-        if (!e.url || !e.url.includes(`press_${e.eventDate.replaceAll("-", "")}_`)) continue;
+        if (!e.url || !e.url.includes(`press_${e.eventDate.replaceAll("-", "")}_`)) {
+          missing.push({ kind: e.kind, eventDate: e.eventDate });
+          continue;
+        }
         outcome = classifyCbsl(pdfText(await getBytes(e.url)));
       } else if (e.kind === "imf") {
         outcome = classifyImf(e.title);
       }
       results.push({ kind: e.kind, eventDate: e.eventDate, outcome: outcome ?? "unclear" });
     } catch (err) {
-      errors.push(`${e.kind} ${e.eventDate}: ${(err as Error).message}`);
+      const msg = (err as Error).message;
+      // A real FOMC decision always has a statement page; 404 means the meeting did not happen then.
+      if (e.kind === "fomc" && /^404\b/.test(msg)) missing.push({ kind: e.kind, eventDate: e.eventDate });
+      else errors.push(`${e.kind} ${e.eventDate}: ${msg}`);
     }
   }
-  return { results, error: errors.length ? errors.slice(0, 3).join("; ") : undefined };
+  return { results, missing, error: errors.length ? errors.slice(0, 3).join("; ") : undefined };
 }
 
 const IMF_RE = /\bIMF\b|International Monetary Fund|Extended Fund Facility|\bEFF\b|staff[- ]level agreement/i;

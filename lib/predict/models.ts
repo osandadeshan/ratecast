@@ -1,4 +1,4 @@
-import { MACRO_FACTORS, MACRO_WINDOW_DAYS } from "../config";
+import { LANKA_FACTORS, MACRO_FACTORS, MACRO_WINDOW_DAYS } from "../config";
 import { addDays, addMonths } from "../dates";
 import type { EventRecord } from "./events";
 import { type NewsDriftStat, newsDriftBetween } from "./news";
@@ -14,6 +14,13 @@ export interface ModelContext {
   /** Known events (knownSince <= anchor) with outcomes, and learned post-announcement drift. */
   events?: EventRecord[];
   newsStats?: NewsDriftStat[];
+  /** Pair id (config TARGETS), so pair-specific models know what they forecast. */
+  pair?: string;
+  /**
+   * SGD→LKR only: the legs' final forecasts made at the same anchor, as summed log moves
+   * ln(SGD→USD_h / SGD→USD_0) + ln(USD→LKR_h / USD→LKR_0) for h = 1..H. Missing when a leg has no forecast.
+   */
+  legMoves?: number[];
 }
 
 /** Each model returns log-rate forecasts for horizons 1..H. */
@@ -146,25 +153,43 @@ function ridgeSolve(A: number[][], b: number[], lambda: number): number[] {
   return M.map((row, i) => row[n] / row[i]);
 }
 
+/** One input of a factor model (see MACRO_FACTORS / LANKA_FACTORS in lib/config.ts). */
+interface FactorSpec {
+  series: string;
+  kind: "move" | "gap";
+  lagDays: number;
+  windowDays: number;
+  transform: "log" | "diff";
+  maxStaleDays: number;
+  fadeDays: number;
+}
+
 /**
- * US 2-year yield and Brent oil, lagged. The return on day d is regressed (ridge, no intercept)
- * on each factor's move over MACRO_WINDOW_DAYS ending at d − 1 − lagDays, i.e. information that was
- * public before day d. Future factor moves are unknown and count as zero, so the signal fades
- * within a week of the horizon. Captures slow pass-through (e.g. oil → LKR import bill).
+ * Ridge regression (λ = n, no intercept, RMS-scaled features) of the pair's daily log return on
+ * lagged factor features, over the last 250 days. A feature for day d only uses data dated
+ * <= d − 1 − lagDays, i.e. public before day d. Beyond the last known date, "move" features see no
+ * new data (so they fade to 0) and every feature is 0 once it is more than fadeDays stale.
  */
-const macro: Model = (ctx, H) => {
+function factorModel(ctx: ModelContext, H: number, all: readonly FactorSpec[]): number[] {
   const f = ctx.factors;
-  const specs = MACRO_FACTORS.filter((s) => (f?.[s.series]?.size ?? 0) > 0);
+  const specs = all.filter((s) => (f?.[s.series]?.size ?? 0) > 0);
   if (!f || !specs.length) return naive(ctx, H);
-  const feature = (s: (typeof specs)[number], d: string): number | undefined => {
+  const feature = (s: FactorSpec, d: string): number | undefined => {
     const known = addDays(ctx.anchorDate, -s.lagDays);
+    const rawEnd = addDays(d, -1 - s.lagDays);
+    if (rawEnd > addDays(known, s.fadeDays)) return 0;
     const clamp = (x: string) => (x > known ? known : x);
-    const end = clamp(addDays(d, -1 - s.lagDays));
-    const start = clamp(addDays(d, -1 - s.lagDays - MACRO_WINDOW_DAYS));
+    const end = clamp(rawEnd);
+    const b = valueAt(f[s.series], end, s.maxStaleDays);
+    if (b === undefined) return undefined;
+    if (s.kind === "gap") {
+      const own = valueAt(ctx.rates, end);
+      return own ? Math.log(b / own) : undefined;
+    }
+    const start = clamp(addDays(rawEnd, -s.windowDays));
     if (start === end) return 0;
-    const a = valueAt(f[s.series], start);
-    const b = valueAt(f[s.series], end);
-    if (a === undefined || b === undefined) return undefined;
+    const a = valueAt(f[s.series], start, s.maxStaleDays);
+    if (a === undefined) return undefined;
     return s.transform === "log" ? Math.log(b / a) : b - a;
   };
 
@@ -196,6 +221,93 @@ const macro: Model = (ctx, H) => {
     out.push(cum);
   }
   return out;
+}
+
+const MACRO_SPECS: FactorSpec[] = MACRO_FACTORS.map((m) => ({
+  series: m.series,
+  kind: "move",
+  lagDays: m.lagDays,
+  windowDays: MACRO_WINDOW_DAYS,
+  transform: m.transform,
+  maxStaleDays: 7,
+  fadeDays: 3650, // effectively never: moves fade on their own (no new data past the known date)
+}));
+
+/** US 2-year yield and Brent oil, lagged (slow pass-through, e.g. oil → LKR import bill). */
+const macro: Model = (ctx, H) => factorModel(ctx, H, MACRO_SPECS);
+
+/**
+ * Sri Lanka data from the central bank (CBSL): the gap between CBSL's official fixing and the pair's
+ * Wise rate, CBSL's own recent USD/LKR move, the policy rate, 3-month T-bill yield, and year-on-year
+ * remittances and tourism earnings. Only for LKR pairs; equals `naive` elsewhere.
+ */
+const lanka: Model = (ctx, H) => {
+  const specs = LANKA_FACTORS.filter((s) => (s.pairs as readonly string[]).includes(ctx.pair ?? ""));
+  return specs.length ? factorModel(ctx, H, specs as unknown as FactorSpec[]) : naive(ctx, H);
+};
+
+/** CBSL fixing used by `cbsl_gap` per pair (market_data series, lag 1 day via LANKA_FACTORS). */
+const CBSL_FIXING: Record<string, string> = { LKR: "lk_sgd_ind", USDLKR: "lk_usd_spot" };
+/** Training window and shrinkage of the gap-closing regression. */
+const GAP_TRAIN_DAYS = 365;
+const GAP_MIN_OBS = 120;
+const GAP_SHRINK = 60; // pseudo-observations at beta = 0
+
+/**
+ * Wise vs the central bank's own fixing. gap(t) = ln(CBSL rate on the last day <= t − 1) − ln(Wise rate
+ * on t). For each horizon h, a no-intercept regression of the realised move
+ * ln(Wise_{t+h} / Wise_t) on gap(t), fitted on past anchors whose outcome is already known (t + h <= anchor),
+ * shrunk toward 0. Forecast = today's rate + beta_h × today's gap. Out of sample (fit before 2026-03,
+ * test after) it cut SGD→LKR 7-day error by ~6%. Only LKR pairs; equals `naive` elsewhere.
+ */
+const cbslGap: Model = (ctx, H) => {
+  const fixing = ctx.factors?.[CBSL_FIXING[ctx.pair ?? ""] ?? ""];
+  if (!fixing?.size) return naive(ctx, H);
+  // gap(t) = ln(latest CBSL fixing dated <= t − 1) − ln(Wise rate on t). Both are known at t's sync.
+  // (Same-day CBSL vs Wise at t − 1 was the weaker signal: corr. with the next 5 days 0.33 vs 0.47.)
+  const gapAt = (t: string): number | undefined => {
+    const c = valueAt(fixing, addDays(t, -1), 7);
+    const w = ctx.rates.get(t);
+    return c !== undefined && w !== undefined ? Math.log(c / w) : undefined;
+  };
+  const { dates, logs } = ctx.series;
+  const n = dates.length;
+  const gaps = dates.map((t) => gapAt(t));
+  const now = gaps[n - 1];
+  if (now === undefined) return naive(ctx, H);
+  const base = logs[n - 1];
+  const out: number[] = [];
+  for (let h = 1; h <= H; h++) {
+    let sxy = 0;
+    let sxx = 0;
+    let k = 0;
+    for (let i = Math.max(0, n - 1 - GAP_TRAIN_DAYS); i + h <= n - 1; i++) {
+      const g = gaps[i];
+      if (g === undefined) continue;
+      sxy += g * (logs[i + h] - logs[i]);
+      sxx += g * g;
+      k++;
+    }
+    if (k < GAP_MIN_OBS || sxx === 0) {
+      out.push(base);
+      continue;
+    }
+    // Ridge toward 0 with GAP_SHRINK pseudo-observations at the mean squared gap.
+    const beta = sxy / (sxx + (GAP_SHRINK * sxx) / k);
+    out.push(base + Math.max(-1, Math.min(1.5, beta)) * now);
+  }
+  return out;
+};
+
+/**
+ * Two-part forecast for SGD→LKR: today's rate moved by the final forecasts of its two legs,
+ * SGD→USD and USD→LKR (each learned separately). Equals `naive` when the legs are missing.
+ */
+const cross: Model = (ctx, H) => {
+  const m = ctx.legMoves;
+  if (!m || m.length < H) return naive(ctx, H);
+  const base = last(ctx.series);
+  return Array.from({ length: H }, (_, i) => base + m[i]);
 };
 
 /**
@@ -220,6 +332,9 @@ export const MODELS: Record<string, Model> = {
   market,
   macro,
   news,
+  lanka,
+  cross,
+  cbsl_gap: cbslGap,
 };
 
 export const MODEL_NAMES = Object.keys(MODELS);
@@ -229,7 +344,7 @@ export const MODEL_NAMES = Object.keys(MODELS);
  * horizon bucket (see learning.ts). New external-data models start here: `macro` failed the
  * 2026-11-11 backtest (slightly worse than naive everywhere) and would have diluted the blend.
  */
-export const SHADOW_MODELS: readonly string[] = ["macro", "news"];
+export const SHADOW_MODELS: readonly string[] = ["macro", "news", "lanka", "cross", "cbsl_gap"];
 
 export const MODEL_LABELS: Record<string, string> = {
   naive: "Random walk",
@@ -240,6 +355,9 @@ export const MODEL_LABELS: Record<string, string> = {
   market: "USD-strength (ECB basket)",
   macro: "US yields + oil (lagged)",
   news: "Post-announcement drift",
+  lanka: "Sri Lanka data (CBSL)",
+  cross: "Two-part: SGD→USD × USD→LKR",
+  cbsl_gap: "Gap to CBSL official rate",
   blend: "Weighted blend (raw)",
   blend_bc: "Blend + bias correction",
   ensemble: "Final (bias-corrected)",

@@ -1,6 +1,8 @@
 ---
 paths:
   - "lib/sources/macro.ts"
+  - "lib/sources/srilanka.ts"
+  - "lib/sources/srilanka-xlsx.ts"
   - "lib/config.ts"
 ---
 
@@ -22,3 +24,17 @@ paths:
 - Deferred: Polymarket/Kalshi Fed-odds. They're keyless and work, but each contract covers one meeting and lives
   only a few months, so a daily series means stitching contracts as meetings roll. That's the same information
   as the 2y yield. Revisit only if `macro` ever gets promoted.
+
+## Sri Lanka series (CBSL, `lib/sources/srilanka.ts`)
+- `SRI_LANKA_SERIES` lists each series with its fetcher and `source_health` key. Series names (`lk_*`) are data.
+  | series | source | lag (`LANKA_FACTORS`) |
+  |---|---|---|
+  | `lk_usd_spot`, `lk_sgd_ind` | CBSL exchange-rate lookup (HTML form **POST**, table back to 2006), health `cbsl-fx` | 1 day |
+  | `lk_opr`, `lk_tbill3m` | statistical table 4.04 `.xlsx` (newest link picked from the statistics page; file name carries the publish date), health `cbsl-rates` | 60 days |
+  | `lk_remit`, `lk_tourism` | tables 2.14.2 / 2.14.1 `.xlsx`, USD mn, monthly at month end, health `cbsl-external` | 45 days |
+- `.xlsx` is read without a dependency (`srilanka-xlsx.ts`: zip central directory + `node:zlib` inflate + shared
+  strings). Keep it that way (free tier, no new packages).
+- Not usable yet: weekly reserves and CBSL's net USD purchases. They're only in a weekly PDF whose text the
+  dependency-free PDF reader can't extract.
+- Models on these series: `lanka` (ridge on all `LANKA_FACTORS`) and `cbsl_gap` (Wise moves toward CBSL's fixing).
+  Both are gated like every model and only run for LKR pairs.

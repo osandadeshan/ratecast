@@ -1,8 +1,9 @@
 import { MAX_HORIZON } from "../config";
 import { addDays } from "../dates";
+import { effectiveHorizon } from "./calendar";
 import { type EventRecord, type EventVolStat, eventExtraVar } from "./events";
 import type { NewsDriftStat } from "./news";
-import { type LearnedStats, statsFor } from "./learning";
+import { BUCKET_MEAN_H, type LearnedStats, statsFor } from "./learning";
 import { MODELS, MODEL_NAMES, type ModelContext } from "./models";
 import { buildSeries, diffs, std } from "./series";
 
@@ -16,12 +17,17 @@ export interface PredictionRow {
   upper80: number | null;
 }
 
-const Z80 = 1.2816;
+export const Z80 = 1.2816;
+/** Band half-width (log) when no trading day lies between anchor and target: the rate cannot move. */
+const FROZEN_HALF_WIDTH = 1e-4;
 
 /**
  * Run every model from `anchorDate`, blend them with learned weights, remove learned bias,
  * attach an 80% band. Returns rows for each model + "blend" + "blend_bc" + "ensemble".
  * Known scheduled events (FOMC, CBSL, ...) inside the horizon widen the band only, never the point.
+ *
+ * Non-trading days (stats.nonTradingDow, e.g. Sunday): the forecast for such a target is the forecast
+ * for the last trading day before it (or the anchor rate), because the rate does not move.
  */
 export function forecast(opts: {
   rates: Map<string, number>; // must already be restricted to dates <= anchorDate
@@ -35,6 +41,9 @@ export function forecast(opts: {
   events?: EventRecord[];
   eventStats?: EventVolStat[];
   newsStats?: NewsDriftStat[];
+  /** Pair id, and for SGD→LKR the legs' summed log moves per horizon (see ModelContext). */
+  pair?: string;
+  legMoves?: number[];
 }): PredictionRow[] {
   const H = opts.horizon ?? MAX_HORIZON;
   const series = buildSeries(opts.rates, opts.anchorDate, 400);
@@ -48,6 +57,8 @@ export function forecast(opts: {
     factors: opts.factors,
     events: opts.events,
     newsStats: opts.newsStats,
+    pair: opts.pair,
+    legMoves: opts.legMoves,
   };
   const out: PredictionRow[] = [];
   const perModel: Record<string, number[]> = {};
@@ -55,32 +66,49 @@ export function forecast(opts: {
 
   const dailyVol = std(diffs(series.logs.slice(-61)));
 
+  const lastLog = series.logs[series.logs.length - 1];
+  const nonTrading = opts.stats.nonTradingDow ?? [];
+
   for (let h = 1; h <= H; h++) {
     const targetDate = addDays(opts.anchorDate, h);
-    const s = statsFor(opts.stats, h);
-    let blend = 0;
-    for (const name of MODEL_NAMES) {
-      const v = perModel[name][h - 1];
-      out.push({ madeOn: opts.anchorDate, targetDate, horizon: h, model: name, predicted: Math.exp(v), lower80: null, upper80: null });
-      blend += s.weights[name] * v;
-    }
-    out.push({ madeOn: opts.anchorDate, targetDate, horizon: h, model: "blend", predicted: Math.exp(blend), lower80: null, upper80: null });
-
-    out.push({ madeOn: opts.anchorDate, targetDate, horizon: h, model: "blend_bc", predicted: Math.exp(blend - s.bias), lower80: null, upper80: null });
-
-    const corrected = blend - s.bias * s.biasOn;
-    const baseSigma = s.sigma ?? Math.max(dailyVol, 1e-4) * Math.sqrt(h);
-    const extra = opts.events && opts.eventStats ? eventExtraVar(opts.events, opts.eventStats, opts.anchorDate, targetDate) : 0;
-    const sigma = Math.sqrt(baseSigma ** 2 + extra);
-    out.push({
+    // hEff = horizon of the last trading day at or before the target (0 = none since the anchor).
+    const hEff = effectiveHorizon(opts.anchorDate, h, nonTrading);
+    const effDate = addDays(opts.anchorDate, hEff);
+    const s = statsFor(opts.stats, Math.max(hEff, 1));
+    const row = (model: string, v: number, half: number | null): PredictionRow => ({
       madeOn: opts.anchorDate,
       targetDate,
       horizon: h,
-      model: "ensemble",
-      predicted: Math.exp(corrected),
-      lower80: Math.exp(corrected - Z80 * sigma),
-      upper80: Math.exp(corrected + Z80 * sigma),
+      model,
+      predicted: Math.exp(v),
+      lower80: half === null ? null : Math.exp(v - half),
+      upper80: half === null ? null : Math.exp(v + half),
     });
+
+    let blend = 0;
+    for (const name of MODEL_NAMES) {
+      const v = hEff === 0 ? lastLog : perModel[name][hEff - 1];
+      out.push(row(name, v, null));
+      blend += s.weights[name] * v;
+    }
+    out.push(row("blend", blend, null));
+    out.push(row("blend_bc", hEff === 0 ? blend : blend - s.bias, null));
+    const corrected = hEff === 0 ? blend : blend - s.bias * s.biasOn;
+
+    // Band half-width. Preferred: the empirical 80th percentile of past |errors| in this bucket,
+    // rescaled from the bucket's mean horizon to this one (errors grow ~√h). Fallback while there
+    // are too few errors: the normal approximation Z80 × sigma. Event variance is added in
+    // quadrature as Z80² × extra, i.e. the half-width an extra normal move of that variance has.
+    let half = FROZEN_HALF_WIDTH;
+    if (hEff > 0) {
+      const base =
+        s.q80 != null
+          ? s.q80 * Math.sqrt(hEff / BUCKET_MEAN_H[s.bucket])
+          : Z80 * (s.sigma ?? Math.max(dailyVol, 1e-4) * Math.sqrt(hEff));
+      const extra = opts.events && opts.eventStats ? eventExtraVar(opts.events, opts.eventStats, opts.anchorDate, effDate) : 0;
+      half = Math.sqrt(base ** 2 + Z80 ** 2 * extra);
+    }
+    out.push(row("ensemble", corrected, half));
   }
   return out;
 }
