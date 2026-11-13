@@ -2,7 +2,7 @@
 import { runSync } from "../lib/sync";
 import { db } from "../lib/db";
 
-runSync()
+runSync({ backtestBudgetMs: Number(process.env.BACKTEST_BUDGET_MS) || 600_000 })
   .then(async (r) => {
     console.log(`[${r.status}] ${r.runDate} in ${r.ms}ms`);
     for (const l of r.log) console.log("  " + l);

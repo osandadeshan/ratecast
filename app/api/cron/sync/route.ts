@@ -1,4 +1,5 @@
 import { connection } from "next/server";
+import { CRON_BACKTEST_BUDGET_MS } from "@/lib/config";
 import { runSync } from "@/lib/sync";
 
 export const maxDuration = 300;
@@ -30,6 +31,6 @@ export async function GET(request: Request) {
   } else if (request.headers.get("authorization") !== `Bearer ${secret}`) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  const result = await runSync();
+  const result = await runSync({ backtestBudgetMs: CRON_BACKTEST_BUDGET_MS });
   return Response.json(result, { status: result.status === "error" ? 500 : 200 });
 }

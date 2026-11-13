@@ -62,6 +62,13 @@ paths:
 - **No look-ahead** in anything you add: inputs restricted to `<= anchorDate` (basket `< anchorDate` in replay).
   Macro factors: `factorsAt(all, anchor)` keeps `date <= anchor − lagDays` in **both** replay and live. Set
   `lagDays` from the observed publication delay, and never lower it to make a backtest look better.
+- **One forecast path.** The sync's replay, its live forecast and the version backtest all call `forecastDay`
+  (`replay.ts`). Change inputs there, not in `sync.ts`, or the backtest stops measuring the deployed code.
+  `npm run backtest` prints the same in-memory backtest; the sync stores it once per `MODEL_VERSION` in
+  `model_versions` and compares skill (MAE ÷ random walk) with the previous version (±0.5% = "same").
+  Bump `MODEL_VERSION_BASE` when predict logic changes, so the change gets its own backtest row.
+- `BucketStats.t` holds the paired t behind each promotion decision; `learningChanges` turns day-to-day
+  differences into `learning_log` rows.
 - Every model change must be backtested (`.claude/skills/backtest`). Ship it only if `ensemble` MAE is no worse
   than before in every bucket, for all three pairs (`LKR`, `USD`, `USDLKR`). Record the new numbers in `docs/CONTEXT.md`.
   - One accepted exception (owner, 2026-11-11): a shadow model that the automatic rule promotes during the

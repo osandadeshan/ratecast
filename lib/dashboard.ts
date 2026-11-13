@@ -114,8 +114,32 @@ export interface SeriesFreshness {
   late: boolean;
 }
 
+export interface VersionView {
+  version: string;
+  firstRun: string;
+  backtestOn: string | null;
+  /** Per pair: next-day..31-day error of the final forecast vs the random walk (skill < 1 = better). */
+  pairs: { pair: string; label: string; n: number; mae: number; naiveMae: number; skill: number; coverage: number }[];
+  previous: string | null;
+  comparison: { pair: string; label: string; skill: number; prevSkill: number; verdict: "better" | "worse" | "same" }[] | null;
+}
+
+export interface LearningLogView {
+  pair: string;
+  label: string;
+  date: string;
+  bucket: number;
+  item: string;
+  change: "promoted" | "demoted";
+  t: number | null;
+}
+
 export interface Dashboard {
   today: string;
+  /** Model versions, newest first, with their automatic backtest and comparison with the previous one. */
+  versions: VersionView[];
+  /** What the learner switched on or off recently (newest first). */
+  learningLog: LearningLogView[];
   /** Every stored series: coverage and freshness. */
   freshness: SeriesFreshness[];
   notIntegrated: typeof NOT_INTEGRATED;
@@ -243,6 +267,8 @@ export async function getDashboard(): Promise<Dashboard> {
     );
     return {
       today,
+      versions: [],
+      learningLog: [],
       modelVersion: MODEL_VERSION,
       hardest: null,
       freshness: [],
@@ -261,7 +287,7 @@ export async function getDashboard(): Promise<Dashboard> {
   const [lastSync] = await sql`
     SELECT finished_at, started_at, status, message FROM sync_runs ORDER BY id DESC LIMIT 1`;
 
-  const [eventRows, healthRows, macroRows, coverRows] = await Promise.all([
+  const [eventRows, healthRows, macroRows, coverRows, versionRows, logRows] = await Promise.all([
     sql`SELECT kind, event_date::text AS event_date, title, url, outcome FROM events
         WHERE known_since <= ${today}
           AND event_date BETWEEN ${addDays(today, -45)} AND ${addDays(today, 75)}
@@ -276,7 +302,33 @@ export async function getDashboard(): Promise<Dashboard> {
         UNION ALL
         SELECT 'market', series, min(date)::text, max(date)::text, count(*)::int
           FROM market_data WHERE series NOT LIKE 'xc:%' GROUP BY series`,
+    sql`SELECT version, first_run::text AS first_run, backtest_on::text AS backtest_on, backtest, previous, comparison
+        FROM model_versions ORDER BY first_run DESC, created_at DESC LIMIT 10`,
+    sql`SELECT currency, as_of::text AS as_of, bucket, item, change, t_stat FROM learning_log
+        ORDER BY as_of DESC, currency, bucket LIMIT 30`,
   ]);
+  const label = (t: string) => {
+    const p = PAIRS[t as Target];
+    return p ? `${p.base} → ${p.quote}` : t;
+  };
+  type Bt = { pairs: { pair: string; overall: { n: number; mae: number; naiveMae: number; skill: number; coverage: number } }[] };
+  const versions: VersionView[] = versionRows.map((v) => ({
+    version: v.version,
+    firstRun: v.first_run,
+    backtestOn: v.backtest_on,
+    pairs: ((v.backtest as Bt | null)?.pairs ?? []).map((p) => ({ pair: p.pair, label: label(p.pair), ...p.overall })),
+    previous: v.previous,
+    comparison: (v.comparison as VersionView["comparison"])?.map((c) => ({ ...c, label: label(c.pair) })) ?? null,
+  }));
+  const learningLog: LearningLogView[] = logRows.map((l) => ({
+    pair: l.currency,
+    label: label(l.currency),
+    date: l.as_of,
+    bucket: l.bucket,
+    item: l.item,
+    change: l.change,
+    t: l.t_stat,
+  }));
   const dayMs = 86_400_000;
   const freshness: SeriesFreshness[] = SERIES_CATALOG.map((c) => {
     const r = coverRows.find((x) => x.t === c.table && x.series === c.series);
@@ -352,6 +404,8 @@ export async function getDashboard(): Promise<Dashboard> {
     : null;
   return {
     today,
+    versions,
+    learningLog,
     modelVersion: MODEL_VERSION,
     hardest,
     freshness,

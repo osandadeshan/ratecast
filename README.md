@@ -50,6 +50,7 @@ only gets weight once it is statistically better than the random walk ("no chang
 | **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart |
 | **Learning panel** | Accuracy by horizon vs a "no change" baseline, recent predicted-vs-actual deltas, current model weights ("not used" until a model is statistically better than "no change"), bias-correction status |
 | **Forecast performance** | Yesterday's forecast vs actual, today's forecast vs the live rate; MAPE, RMSE and MAE over 7/30/90 days next to the random walk; error by horizon (1/7/14/30 days) with how often the actual fell inside the 80% range; bias (too high/too low, only when statistically clear); improving/deteriorating vs the baseline; 30-day outlook (a direction only when today's rate is outside the forecast's 80% range); model version, training date, history coverage, live vs replayed forecast counts and the hardest pair |
+| **Model versions and learning log** | Each forecasting-code version is backtested automatically on its first run (last year replayed, scored vs the random walk) and compared with the previous version; every time the learner switches a model or the bias correction on or off is logged with its t-statistic |
 | **Data sources** | Freshness of every ingested series (first/latest date, late flag), scraper health, and the sources deliberately not integrated, with the reason |
 | **Light & dark mode, mobile friendly** | Works at phone width (390px) |
 
@@ -511,11 +512,13 @@ lib/
   sources/                  wise.ts, market.ts, macro.ts (Treasury yield, FRED Brent), events.ts (Fed/CBSL
                             calendars), srilanka.ts + srilanka-xlsx.ts (CBSL rates and tables), pdf.ts, http.ts
   predict/                  series.ts, calendar.ts (non-trading days), models.ts, learning.ts, events.ts,
+                            replay.ts (one forecast day, shared), backtest.ts (version backtest),
                             news.ts, engine.ts (pure, no I/O)
   sync.ts                   The sync pipeline
   dashboard.ts              All read queries for the page
   performance.ts            Pure accuracy metrics for the Performance card
 scripts/sync.ts             Run a sync from the command line
+scripts/backtest.ts         npm run backtest: in-memory 365-day backtest of the current code (writes nothing)
 vercel.json                 Region sin1 + daily cron
 tests/                      Unit tests (node:test via tsx): parsers, dates, PDF text, events, news, cbsl_gap, validation, performance
 docs/                       ARCHITECTURE.md, CONTEXT.md

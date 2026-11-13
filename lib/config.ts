@@ -47,6 +47,14 @@ export const BACKFILL_DAYS = 365;
  */
 export const REPLAY_BUDGET_MS = Number(process.env.REPLAY_BUDGET_MS) || 40_000;
 
+/**
+ * Deadline (ms since the sync started) for the once-per-version backtest (sync step 4b, ~30 s locally).
+ * Past it the backtest stops and stores nothing; the next run tries again. Page-triggered syncs use
+ * this default (Vercel's 60 s limit); the cron passes CRON_BACKTEST_BUDGET_MS (its route allows 300 s).
+ */
+export const BACKTEST_BUDGET_MS = Number(process.env.BACKTEST_BUDGET_MS) || 50_000;
+export const CRON_BACKTEST_BUDGET_MS = 240_000;
+
 /** Window of evaluated predictions used for weights / bias. */
 export const LEARNING_WINDOW_DAYS = 180;
 

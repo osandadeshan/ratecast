@@ -29,3 +29,5 @@ paths:
   to the random walk's on the same dates. Bias, trend and outlook show a verdict only when it passes the
   test in `lib/performance.ts`, otherwise "none"/"no clear change"/"no clear direction". Delta wording is
   predicted − actual ("too high" / "too low").
+- `VersionsCard` (before Data sources) reads `data.versions` (latest version's backtest per pair + comparison) and
+  `data.learningLog`. Skill < 1 = better than the random walk; always show the random walk's error beside it.

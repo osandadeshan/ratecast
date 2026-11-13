@@ -27,6 +27,8 @@ paths:
   | `model_stats` | predict | JSON of `LearnedStats` per currency per day |
   | `events` | `ingestEvents` + `classifyOutcomes` (sync) | PK (kind, event_date). `known_since` gates replay (upsert keeps `LEAST`). `outcome` (added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`): `cut`/`hold`/`hike`, `sla`/`board`/`other`, `unclear`, or NULL until classified; the upsert never overwrites it. ~10 rows/year/kind |
   | `source_health` | `recordHealth` (sync) | PK source. Last ok / error / note per automatic source: fed-page, fed-json, cbsl-mpr, cbsl-rss, treasury, fred-brent, cbsl-fx, cbsl-rates, cbsl-external, wise-history:*, wise-live:*, cross-rate |
+  | `model_versions` | `backtestVersion` (sync step 4b) | PK version. One row per `MODEL_VERSION` that ran; `backtest` (JSON from `runBacktest`), `previous`, `comparison` written once, never updated. Only stored when the backtest finished inside its budget (page sync 50 s from start, cron 240 s) |
+  | `learning_log` | predict (live run) | PK (currency, as_of, bucket, item). Append-only audit of promotions/demotions (model or `bias_correction`) vs the previous stored `model_stats`, with the deciding t |
   | `sync_runs`, `sync_lock` | runSync | lock row expires after 5 min; `sync_runs.model_version` |
 - **Scoring** (`evaluatePredictions`): `ANALYZE predictions, rates_history` and then one `INSERT … SELECT` inside
   `sql.begin` with `SET LOCAL enable_nestloop = off`. After a 365-day replay (~470k rows) the planner otherwise

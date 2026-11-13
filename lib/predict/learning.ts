@@ -36,6 +36,11 @@ export interface BucketStats {
    * distinct target dates and MAE < 0.98 × naive). false = scored but weight 0.
    */
   promoted?: Record<string, boolean>;
+  /**
+   * The paired t-statistic behind each promotion decision (vs `naive`; `blend_bc` vs `blend` for the bias
+   * correction). null = fewer than the required distinct dates. Promoted when t < −2.6. For the audit log.
+   */
+  t?: Record<string, number | null>;
 }
 
 export interface LearnedStats {
@@ -184,10 +189,10 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
     // Paired test "is `a` really better than `b` here?": per target date d = mean|err a| − mean|err b|,
     // t = mean(d) / (sd(d) / √nEff). Forecasts for neighbouring dates overlap by about the bucket's
     // mean horizon, so the effective sample is nEff = dates / meanH. Better = t < −T_BEATS.
-    const beats = (a: string, b: string): boolean => {
+    const pairedT = (a: string, b: string): number | null => {
       const ga = index.days(bucket, a);
       const gb = index.days(bucket, b);
-      if (!ga || !gb) return false;
+      if (!ga || !gb) return null;
       let k = 0;
       let sum = 0;
       let sq = 0;
@@ -200,11 +205,17 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
         sum += d;
         sq += d * d;
       }
-      if (k < minDates) return false;
+      if (k < minDates) return null;
       const mean = sum / k;
       const sd = Math.sqrt(Math.max(sq / k - mean * mean, 0) * (k / (k - 1)));
       const nEff = k / BUCKET_MEAN_H[bucket];
-      return sd > 0 && mean / (sd / Math.sqrt(nEff)) < -T_BEATS;
+      return sd > 0 ? mean / (sd / Math.sqrt(nEff)) : null;
+    };
+    const tStats: Record<string, number | null> = {};
+    const beats = (a: string, b: string): boolean => {
+      const t = pairedT(a, b);
+      tStats[a] = t;
+      return t !== null && t < -T_BEATS;
     };
 
     // Gate: a model is scored every day but only gets weight once it beats the random walk here.
@@ -286,6 +297,7 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
       sigmaN: ensN,
       q80,
       promoted,
+      t: tStats,
     };
   });
 

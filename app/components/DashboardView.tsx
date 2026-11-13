@@ -65,6 +65,7 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         </div>
       </div>
       <LearningSection c={c} />
+      <VersionsCard data={data} />
       <SourcesCard data={data} />
 
       <footer className="text-xs text-ink-3 pb-6 space-y-1">
@@ -919,6 +920,104 @@ function SourcesCard({ data }: { data: Dashboard }) {
           </ul>
         </div>
       </div>
+    </section>
+  );
+}
+
+const BUCKET_LABEL: Record<number, string> = { 1: "next day", 3: "2–3 days", 7: "4–7 days", 14: "8–14 days", 31: "15–31 days" };
+const VERDICT_COLOR = { better: "var(--good-text)", worse: "var(--critical)", same: "var(--text-2)" } as const;
+
+/** Model version history: each version's automatic one-year backtest and what the learner switched on or off. */
+function VersionsCard({ data }: { data: Dashboard }) {
+  const [latest, ...older] = data.versions;
+  return (
+    <section className="card p-4 sm:p-6 min-w-0" aria-label="Model versions">
+      <h2 className="text-lg font-semibold">Model versions and learning log</h2>
+      <p className="text-xs text-ink-3 mt-0.5 mb-3">
+        When the forecasting code changes it gets a new version. Its first daily run replays the last year from the data
+        known on each day, scores the last 300 days against the random walk, and compares the result with the previous
+        version. Skill below 1.000 means smaller errors than &ldquo;no change&rdquo;.
+      </p>
+      {!latest ? (
+        <p className="text-sm text-ink-2">No version has been backtested yet. It runs with the next daily update.</p>
+      ) : (
+        <>
+          <p className="text-sm">
+            Current version <span className="num font-medium">{latest.version}</span>
+            <span className="text-ink-3 text-xs">
+              {" "}
+              · first run {shortDate(latest.firstRun)}
+              {latest.backtestOn ? ` · backtested ${shortDate(latest.backtestOn)}` : " · backtest pending"}
+            </span>
+          </p>
+          {latest.pairs.length > 0 && (
+            <div className="overflow-x-auto -mx-4 sm:mx-0 px-4 sm:px-0 mt-2">
+              <table className="w-full text-sm min-w-[520px]">
+                <thead className="text-xs text-ink-3 text-left">
+                  <tr className="border-b border-line">
+                    <th className="font-medium py-1.5">Pair</th>
+                    <th className="font-medium py-1.5 text-right">Error (all horizons)</th>
+                    <th className="font-medium py-1.5 text-right">Random walk</th>
+                    <th className="font-medium py-1.5 text-right">Skill</th>
+                    <th className="font-medium py-1.5 text-right">In 80% range</th>
+                    <th className="font-medium py-1.5 text-right">vs previous</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latest.pairs.map((p) => {
+                    const cmp = latest.comparison?.find((c) => c.pair === p.pair);
+                    return (
+                      <tr key={p.pair} className="border-b border-line last:border-0">
+                        <td className="py-1.5">{p.label}</td>
+                        <td className="num py-1.5 text-right">{pct(p.mae, 3, false)}</td>
+                        <td className="num py-1.5 text-right text-ink-2">{pct(p.naiveMae, 3, false)}</td>
+                        <td className="num py-1.5 text-right">{p.skill.toFixed(3)}</td>
+                        <td className="num py-1.5 text-right text-ink-2">{p.coverage.toFixed(0)}%</td>
+                        <td className="py-1.5 text-right text-xs">
+                          {cmp ? (
+                            <span style={{ color: VERDICT_COLOR[cmp.verdict] }}>
+                              {cmp.verdict} ({cmp.prevSkill.toFixed(3)} → {cmp.skill.toFixed(3)})
+                            </span>
+                          ) : (
+                            <span className="text-ink-3">first version</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {older.length > 0 && (
+            <p className="text-xs text-ink-3 mt-2">
+              Earlier: {older.map((v) => `${v.version} (from ${shortDate(v.firstRun)})`).join(" · ")}
+            </p>
+          )}
+        </>
+      )}
+      <h3 className="text-sm font-semibold mt-4 mb-1">Learning log</h3>
+      {data.learningLog.length === 0 ? (
+        <p className="text-xs text-ink-3">
+          No model or bias correction has been switched on or off since logging began. The forecast stays the random walk
+          until a candidate beats it with a paired t-test (t &lt; −2.6) on at least 30 days.
+        </p>
+      ) : (
+        <ul className="text-xs space-y-1">
+          {data.learningLog.map((l) => (
+            <li key={`${l.pair}-${l.date}-${l.bucket}-${l.item}`} className="flex justify-between gap-3">
+              <span className="text-ink-2">
+                {shortDate(l.date)} · {l.label} · {l.item === "bias_correction" ? "Bias correction" : (MODEL_LABELS[l.item] ?? l.item)},{" "}
+                {BUCKET_LABEL[l.bucket] ?? `${l.bucket} days`}
+              </span>
+              <span className="whitespace-nowrap" style={{ color: l.change === "promoted" ? "var(--good-text)" : "var(--critical)" }}>
+                {l.change === "promoted" ? "switched on" : "switched off"}
+                {l.t != null && <span className="text-ink-3"> · t {l.t.toFixed(2)}</span>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

@@ -192,6 +192,30 @@ in the last 300 days. Average |% miss|, `ensemble` / `naive`:
 - Scoring speed: the first scoring after a full replay took 13 min (nested-loop anti-join on an empty
   `prediction_errors`); with `enable_nestloop = off` for that statement, 8 s. Full first sync locally: 54 s.
 
+**2026-11-13 · automatic version backtest (Phase 3).** `lib/predict/backtest.ts` replays the deployed code
+in memory over the last 365 days (from no learned state, no rows written), scores targets in the last 300 days
+(Sundays excluded) and stores the result in `model_versions` on the first sync of each `MODEL_VERSION`. It uses the
+sync's own forecast path (`forecastDay`). Buckets are the learner's (1, 2–3, 4–7, 8–14, 15–31 days), so the numbers
+differ slightly from the table above. First stored run (`2026.11.13`), MAE % final / random walk, skill, 80% coverage:
+
+| pair | 1 day | 2–3 | 4–7 | 8–14 | 15–31 | all |
+|---|---|---|---|---|---|---|
+| SGD→USD | 0.1637 / 0.1637 | 0.2343 / 0.2343 | 0.3360 / 0.3360 | 0.4570 / 0.4570 | 0.6511 / 0.6511 | skill 1.0000 · 83.5% |
+| USD→LKR | 0.1783 / 0.1783 | 0.2487 / 0.2487 | 0.3801 / 0.3801 | 0.5473 / 0.5473 | 0.9465 / 0.9453 | skill 1.0009 · 67.2% |
+| SGD→LKR | 0.2724 / 0.2724 | 0.3520 / 0.3520 | 0.4832 / 0.4832 | 0.6357 / 0.6357 | 0.9332 / 0.9429 | skill 0.9930 · 80.2% |
+
+- During the year a model passed the gate briefly at 15–31 days for both LKR pairs: SGD→LKR gained 1.0% there,
+  USD→LKR lost 0.1%. Everywhere else the final forecast was the random walk.
+- USD→LKR 80% ranges are too narrow (63–76% coverage): its error distribution changed when the 2025 flat-Monday
+  regime ended (below), so ranges learned on the calm months under-cover the busier ones. Candidate for Phase 4.
+- **Non-trading days beyond Sundays: tested, not changed.** Wise's USD→LKR point was flat on 51 Mondays (most of
+  Jun 2025 – Jan 2026, almost none since Mar 2026) and on 12 of 25 Sri Lankan Poya (full-moon) days or the day
+  after; SGD pairs almost never. Neither pattern is a fixed weekday, so the weekday detector correctly ignores
+  them. Two variants were backtested: (a) a shorter/looser detector (13 weeks at 75%, 8 weeks at 70%): identical
+  results to the digit; (b) dropping observed-flat target dates from learning: USD→LKR 2–3d 0.2487 → 0.2497 and
+  4–7d 0.3801 → 0.3844 (worse), others unchanged. Neither was kept. Flat days stay in scoring because a holiday
+  forecast that stays flat is genuinely right; the random walk gets the same credit on the same dates.
+
 ## Known limitations / risks
 - **Wise may block Vercel IPs** (untested at the time of writing). The live quote and sync would fail; check
   with the `verify-deploy` skill.

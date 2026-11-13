@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "sync": "tsx --env-file=.env.local scripts/sync.ts",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "backtest": "tsx --env-file=.env.local scripts/backtest.ts"
   },
   "dependencies": {
     "next": "16.4.5",

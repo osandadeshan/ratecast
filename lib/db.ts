@@ -141,6 +141,32 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 );
 ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS model_version text;
 
+-- Model version history (added 2026-11-13). One row per MODEL_VERSION that ran a sync. backtest = the
+-- automatic 365-day in-memory replay of that code (lib/predict/backtest.ts), scored vs the random walk;
+-- comparison = against the previous version that has a backtest. Written once per version, never updated.
+CREATE TABLE IF NOT EXISTS model_versions (
+  version      text PRIMARY KEY,
+  first_run    date NOT NULL,
+  backtest_on  date,
+  backtest     jsonb,
+  previous     text,
+  comparison   jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Audit log of the learner: a model or the bias correction switched on (promoted) or off (demoted) in a
+-- horizon bucket, with the paired t-statistic that decided it. Append-only.
+CREATE TABLE IF NOT EXISTS learning_log (
+  currency      text NOT NULL,
+  as_of         date NOT NULL,
+  bucket        int  NOT NULL,
+  item          text NOT NULL,
+  change        text NOT NULL,
+  t_stat        double precision,
+  model_version text,
+  PRIMARY KEY (currency, as_of, bucket, item)
+);
+
 CREATE TABLE IF NOT EXISTS sync_lock (
   id        int PRIMARY KEY,
   locked_at timestamptz NOT NULL

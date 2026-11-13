@@ -216,6 +216,20 @@ outcome (`COALESCE(events.outcome, EXCLUDED.outcome)`).
   (≈ 89% of forecasts). It is a shadow model, so it only enters the blend once it beats the random walk under
   the promotion rule above.
 
+## Version backtest and learning log
+
+- `forecastDay` (`lib/predict/replay.ts`) is the single learn → forecast step for one anchor day. The sync's
+  replay of missed days, its live forecast and the backtest all call it.
+- Sync step 4b, once per `MODEL_VERSION` (only when the replay is complete): `runBacktest` replays the last
+  365 days in memory from an empty error index, for all pairs in `PREDICT_ORDER` (SGD→LKR's `cross` gets the
+  legs' in-memory paths), and scores final vs `naive` on targets in the last 300 days, Sundays excluded. About
+  30 s locally. Stored in `model_versions` with `compareVersions` against the previous backtested version (skill
+  = MAE ÷ random walk on its own window, ±0.5% = same). Deadline: 50 s from sync start for page-triggered syncs,
+  240 s for the cron (`maxDuration` 300). If time runs out nothing is stored and the next run retries.
+- After the live forecast, `learningChanges` compares today's `LearnedStats` with the previous stored day's and
+  appends promotions/demotions (per bucket, model or `bias_correction`, with the paired t) to `learning_log`.
+- Dashboard: `.versions` (last 10) and `.learningLog` (last 30) feed the "Model versions and learning log" card.
+
 ## Read path (`lib/dashboard.ts`)
 
 - The month table/chart, per day: official or live actual; the latest `ensemble` forecast made before that
