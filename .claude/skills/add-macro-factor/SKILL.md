@@ -6,7 +6,13 @@ description: Add a new macro factor (e.g. US 10y yield, DXY, gold, SGD rates) as
 # Add a macro factor
 
 Read `.claude/rules/macro.md` and `.claude/rules/forecasting.md` first. Requirements: keyless, free, no second
-cron, fully automatic. The `macro` model stays in **shadow** until the learner promotes it. Never promote by hand.
+cron, fully automatic. The `macro` model stays at weight 0 until the learner's significance gate promotes it
+(≥ 30 distinct dates, paired t < −2.6 vs naive). Never promote by hand or loosen the gate.
+
+**Sri Lanka (CBSL) series** go to `LANKA_FACTORS` / `SRI_LANKA_META` in `lib/config.ts` instead, are fetched in
+`lib/sources/srilanka.ts` (+ `srilanka-xlsx.ts` for statistical-table .xlsx files) and feed the `lanka` model
+(LKR pairs only). Same lag rule: monthly CBSL tables are lagged 45–60 days. A factor whose effect is a gap to an
+official rate may deserve its own model, like `cbsl_gap`.
 
 1. **Verify the source from the shell** with a generic UA, and save a sample to the scratchpad. Check:
    history length (≥ 2 years), latest date vs today (that's the publication lag), and how the format differs by

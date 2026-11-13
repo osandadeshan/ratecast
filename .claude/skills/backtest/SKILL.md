@@ -1,6 +1,6 @@
 ---
 name: backtest
-description: Re-run RateCast's 90-day no-lookahead replay against the local database and compare every model, the blend and the final ensemble to the random-walk baseline by horizon. Use after any change to lib/predict or the learning/sync logic, or when asked how accurate the predictor is.
+description: Re-run RateCast's 365-day no-lookahead replay against the local database and compare every model, the blend and the final ensemble to the random-walk baseline by horizon. Use after any change to lib/predict or the learning/sync logic, or when asked how accurate the predictor is.
 ---
 
 # Backtest the forecasting models
@@ -13,20 +13,25 @@ Uses the local DB only (`ratecast-pg`). **Never run the reset against production
    docker exec ratecast-pg psql -U postgres -d rates -qc "TRUNCATE predictions, prediction_errors, model_stats, sync_runs CASCADE;"
    npm run sync
    ```
-   The log must show `replayed 90 past days` for LKR and USD.
-3. Score the last ~60 days. The first ~30 replayed days are warm-up with equal weights, so start
-   `made_on` at today − 60:
+   The replay is 365 days and time-boxed to 40 s per run, so for a backtest run
+   `REPLAY_BUDGET_MS=100000000 npm run sync` (~1 min on an empty DB; in the Claude Code sandbox:
+   `REPLAY_BUDGET_MS=100000000 node --import tsx --env-file=.env.local scripts/sync.ts`). The log must show
+   `replayed 365 past days` for all three pairs (`USD`, `USDLKR`, `LKR`).
+3. Score the last ~300 days (the first ~60 replayed days are warm-up, and no model can be promoted before
+   ≥ 30 distinct target dates). Exclude non-trading days (Sundays: Wise repeats Saturday):
+   add `AND extract(dow FROM target_date) <> 0` and use `made_on >= current_date - 300` in the queries below
+   (the older sections still say 60).
    ```bash
    docker exec ratecast-pg psql -U postgres -d rates -c "
    SELECT currency, model,
           CASE WHEN horizon=1 THEN '1' WHEN horizon<=7 THEN '2-7' WHEN horizon<=14 THEN '8-14' ELSE '15-31' END AS hb,
           count(*) n, round(avg(abs(pct_error))::numeric,3) AS mae_pct, round(avg(pct_error)::numeric,3) AS bias_pct
    FROM prediction_errors
-   WHERE made_on >= current_date - 60
+   WHERE made_on >= current_date - 300 AND extract(dow FROM target_date) <> 0
    GROUP BY 1,2,3 ORDER BY 1,3,5;"
    ```
 4. Report per currency and bucket: `ensemble` vs `naive` vs the best single model.
-   - **Accept** a change only if `ensemble` is no worse than before in every bucket for both currencies.
+   - **Accept** a change only if `ensemble` is no worse than before in every bucket for all three pairs.
    - `ensemble` should be ≤ `blend`. If it isn't, the bias gate is misbehaving.
 5. Put the new numbers in the "Backtest results" table in `docs/CONTEXT.md`, with the date.
 
@@ -121,5 +126,16 @@ News results (2026-11-11, Phase 3), same method (`// news, (BT-TEMP)`):
     -c "SELECT kind, outcome, count(*) FROM events WHERE event_date < current_date GROUP BY 1,2 ORDER BY 1,2;"
   ```
 
-Baseline (2026-11-09), ensemble / naive MAE %: LKR 1d 0.126/0.126 · 15–31d 0.396/0.399; USD 1d 0.095/0.093 ·
+Gating results (2026-11-12/13, 365-day replay, last 300 days, Sundays excluded), ensemble = naive MAE %:
+- SGD→LKR 1d 0.2735 · 2–7d 0.4413 · 8–14d 0.6269 · 15–31d 0.9322
+- SGD→USD 1d 0.1636 · 2–7d 0.3037 · 8–14d 0.4530 · 15–31d 0.6280
+- USD→LKR 1d 0.1788 · 2–7d 0.3382 · 8–14d 0.5595 · 15–31d 1.0087
+- Before gating every model, the ensemble was worse than naive in every bucket (SGD→USD 15–31d +15%). A t < −2
+  bar promoted noise for USD→LKR in May 2026 (2–7d +5%), hence t < −2.6 (Bonferroni, ~10 candidates).
+- `cbsl_gap` vs naive: SGD→LKR 2–7d 0.4397, 8–14d 0.6126 (−2.3%), 15–31d 0.9276; worse for USD→LKR (0.1857,
+  0.3630, 0.5729, 1.0188). Out-of-sample (fit before 2026-03, test after) SGD→LKR 7d −5.7%. Not promoted yet.
+- 80% band coverage (q80 band): SGD→USD ~90%, USD→LKR 78–82%, SGD→LKR 85–96%.
+- The scoring INSERT needs `enable_nestloop = off` after a big replay (13 min → 8 s); it's in `lib/sync.ts`.
+
+Older baseline (2026-11-09, 90-day replay), ensemble / naive MAE %: LKR 1d 0.126/0.126 · 15–31d 0.396/0.399; USD 1d 0.095/0.093 ·
 15–31d 0.380/0.315.

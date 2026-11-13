@@ -18,4 +18,9 @@ paths:
 - Must work at **390px** wide with no horizontal page scroll. Grid/flex children holding tables get `min-w-0`,
   and wide tables sit in `overflow-x-auto`. Headless Chrome screenshots below ~500px are misleading; verify
   with Playwright device emulation (see the `run-locally` skill).
+- Three tabs, one per pair (`TARGETS`). Labels come from the payload's `c.base`/`c.quote` (from `PAIRS` in
+  `lib/config.ts`): never assume the base is SGD.
+- Models that only exist for some pairs are filtered with `PAIR_ONLY` in `DashboardView.tsx` (`lanka`,
+  `cbsl_gap`: LKR + USDLKR; `cross`: LKR). Add new pair-specific models there. Gated models show "not used".
+- Sri Lanka series in Market context come from `SRI_LANKA_META` (`lib/config.ts`) via `lib/dashboard.ts`.
 - Copy is plain and honest. Never imply guaranteed predictions. Keep the "not financial advice" footer.

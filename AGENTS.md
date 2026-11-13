@@ -31,9 +31,12 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 59 tests) |
+| Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
 
-There is no test suite. Verify changes with typecheck + lint + build, `npm run sync`, and by loading the page
+`tests/` covers the pure parts (parsers, dates, PDF text, events, news, `cbsl_gap`). Add a test for every new
+parser or model. Verify changes with tests + typecheck + lint + build, `npm run sync`, and by loading the page
 or `GET /api/dashboard`. For model changes, run the backtest (`.claude/skills/backtest/SKILL.md`).
 
 ## Layout
@@ -53,13 +56,14 @@ lib/sources/                  Wise (history, comparisons), market (ECB basket, c
                               decision outcomes read from each FOMC statement / CBSL review PDF),
                               pdf (dependency-free PDF text via node:zlib), http (getJSON/getText/getBytes)
 lib/predict/                  series helpers, calendar (detects non-trading weekdays, e.g. Sundays),
-                              models (incl. `macro`, `lanka`, `cross` + SHADOW_MODELS), learning (weights/bias/
+                              models (incl. `macro`, `lanka`, `cross`, `cbsl_gap` + SHADOW_MODELS), learning (weights/bias/
                               sigma/shadow promotion), events (event-day
                               volatility + band widening), news (post-announcement drift for the
                               shadow `news` model), engine (forecast)
 lib/sync.ts                   Orchestration of a sync run, incl. no-lookahead replay of missed days
 lib/dashboard.ts              All read queries for the page
 scripts/sync.ts               CLI wrapper for runSync()
+tests/                        Unit tests for the pure code (node:test)
 vercel.json                   Functions in sin1 (Singapore, next to Neon); cron /api/cron/sync at 01:30 UTC (09:30 SGT)
 ```
 
@@ -69,7 +73,7 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
    on this.
 2. **Actuals are official only.** `prediction_errors` is filled only from `rates_history.source = 'wise'`.
    Today's live quote is stored as `source = 'wise_live'` (provisional) and is overwritten by Wise's daily point.
-3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross`
+3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross, cbsl_gap`
    plus the derived `blend` (raw weighted), `blend_bc` (blend with bias correction, always stored as the
    counterfactual) and `ensemble` (the final number shown to users). Renaming a model orphans its history.
 4. **Schema changes are additive.** `ensureSchema()` runs `CREATE ... IF NOT EXISTS` on every cold start. There
@@ -99,7 +103,7 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
      ≥ 30 distinct target dates there and beats the random walk by a paired t-test on per-date |error|
      (overlap-adjusted n, t < −2.6, Bonferroni for ~10 candidates). The bias correction passes the same
      test against `blend`. Promotion is automatic (`BucketStats.promoted`). `SHADOW_MODELS` (`macro`, `news`,
-     `lanka`, `cross`) only marks models built on external data for the UI. Never loosen the bar to get a model in.
+     `lanka`, `cross`, `cbsl_gap`) only marks models built on external data for the UI. Never loosen the bar to get a model in.
    - Non-trading weekdays (Sunday's Wise point repeats Saturday's) are detected from the data
      (`calendar.ts`): forecasts stay flat across them and their target dates are left out of learning.
 8. **Pairs are data, and SGD→LKR is also forecast in two parts.** `TARGETS` ids (`LKR`, `USD`, `USDLKR`) are
@@ -123,4 +127,10 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
 - Macro factors (Treasury yield curve CSV, FRED Brent CSV) are keyless and use the same cron. Polymarket/Kalshi
   Fed odds are deferred: per-meeting contracts would need stitching and have short histories, and the 2y yield
   (same information) earned no weight. Revisit only if `macro` gets promoted.
+- Sri Lanka data (CBSL indicative-rate form POST + statistical-table .xlsx, read by `lib/sources/srilanka-xlsx.ts`
+  without a dependency) uses the same cron. CBSL weekly reserves and net USD purchases are only in a weekly PDF
+  the `node:zlib` reader can't extract, so they're not ingested. Labels for the UI live in `SRI_LANKA_META`
+  (`lib/config.ts`): don't import `lib/sources/*` from `lib/dashboard.ts` (it broke the Turbopack build).
+- Scoring (`evaluatePredictions`) runs `ANALYZE` then the INSERT with `SET LOCAL enable_nestloop = off`.
+  Without it a big replay made the planner pick nested loops (13 min instead of 8 s). Keep it.
 - Be honest in UI copy: FX is close to a random walk. Always show accuracy next to the random-walk baseline.

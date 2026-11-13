@@ -29,7 +29,13 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    - `.macro` should list `ust2y` (date = last US business day) and `brent` (about a week old, which is normal).
    - The first sync takes ~1 min longer: it downloads 3 yearly Treasury CSVs, one at a time, and home.treasury.gov
      can take ~20 s each. `treasury` failing with a timeout once is OK; it should be ok after the next run.
-   - The `macro` model shows "shadow" in the weights table until it beats the random walk. That's by design.
+   - Every model except the random walk shows "not used" in the weights table until it passes the significance
+     gate (t < −2.6 vs naive). As of 2026-11-13 none has, so the forecast equals today's rate. That's by design.
+   - **Sri Lanka series.** The log must have `lk_usd_spot`, `lk_sgd_ind`, `lk_opr`, `lk_tbill3m`, `lk_remit`,
+     `lk_tourism` lines, and `source_health` rows `cbsl-fx`, `cbsl-rates`, `cbsl-external` should be ok. `.macro`
+     on the dashboard lists them; monthly series are 1–2 months old, which is normal.
+   - **Three pairs.** `.currencies` has `LKR`, `USD` and `USDLKR`. The first sync replays 365 days in 40 s
+     slices, so `.lastSync.status` is `partial` for the first ~2 runs.
 6. **Decision outcomes.** After the first sync, past events should carry outcomes:
    `curl -s $URL/api/dashboard | jq '[.events.recent[] | "\(.date) \(.short) \(.outcome)"], [.events.health[] | select(.source=="outcomes")]'`
    - Recent Fed/CBSL events show `cut`/`hold`/`hike`. `outcomes` health is `ok: true`. The log has an
@@ -37,6 +43,6 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    - The first run reads up to 32 statements (FOMC HTML + CBSL PDFs), which adds ~20 s. Any rest follow next day,
      shown as the note "N statements not read yet". `unclear` means a statement's wording changed: update the
      classifier in `lib/sources/events.ts` (phrases are in `.claude/rules/events.md`).
-   - `news` shows "shadow" in the weights table until it beats the random walk. That's by design.
+   - `news` shows "not used" in the weights table until it beats the random walk. That's by design.
 7. **Next day.** `.lastSync.at` should be about 01:30 UTC and `recentDeltas` should gain a row each day.
 8. Report findings plainly, with the exact fix in the Vercel dashboard.

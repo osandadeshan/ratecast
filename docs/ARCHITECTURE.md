@@ -44,7 +44,9 @@
      today's provisional `rates_history` row (`wise_live`), which never overwrites a `wise` row.
 4. **Evaluate.** A single INSERT…SELECT joins `predictions` to official `rates_history` rows and writes every
    not-yet-scored prediction to `prediction_errors` with `delta = actual − predicted`,
-   `pct_error = (predicted − actual)/actual × 100` and `log_error = ln(predicted/actual)`.
+   `pct_error = (predicted − actual)/actual × 100` and `log_error = ln(predicted/actual)`. It runs after `ANALYZE`
+   inside a transaction with `SET LOCAL enable_nestloop = off`: after a 365-day replay the planner otherwise picked
+   nested loops (13 min instead of 8 s).
    Then **Sri Lanka series** (`SRI_LANKA_SERIES` in `lib/sources/srilanka.ts`): CBSL's daily indicative USD/LKR
    (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) via its rate-lookup form, and monthly policy rate (`lk_opr`),
    3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`) and tourism earnings (`lk_tourism`) from

@@ -10,8 +10,10 @@ description: Start RateCast locally (Postgres in Docker, sync, Next server) and 
    docker start ratecast-pg 2>/dev/null || docker run -d --name ratecast-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=rates -p 54329:5432 postgres:16-alpine
    test -f .env.local || echo 'DATABASE_URL=postgres://postgres:dev@localhost:54329/rates' > .env.local
    ```
-2. **Sync.** Run `npm run sync`. The first run downloads 2 years of history and replays 90 days (~10 s). Later
-   runs take ~2 s. Expect `[ok]`, an `events: N rows · fed-page …, cbsl-mpr …` line (no `FAILED`) and per-currency
+2. **Sync.** Run `npm run sync`. The first run downloads 2 years of history and replays 365 days in 40 s
+   slices (status `partial` until done; `REPLAY_BUDGET_MS=100000000` does it in one ~54 s run). Later runs take
+   ~10–20 s. In the Claude Code sandbox use `node --import tsx --env-file=.env.local scripts/sync.ts`; Docker
+   (Colima) and `next build`/`next start` must run outside the sandbox. Expect `[ok]`, an `events: N rows · fed-page …, cbsl-mpr …` line (no `FAILED`) and per-pair (USD, USDLKR, LKR)
    `forecast ... tomorrow ≈ ...` lines.
 3. **Serve.** For quick iteration, run `npm run dev` in the background. To check production behaviour (Cache
    Components, prerendering), use `npm run build && PORT=3123 npx next start` in the background.

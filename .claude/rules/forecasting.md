@@ -51,13 +51,19 @@ paths:
   changes, YoY remittances and tourism. Each feature has its own lag, staleness limit and fade.
 - `cross` model (shadow, SGD→LKR only): today's rate moved by the legs' `ensemble` forecasts
   (ln SGD→USD_h/SGD→USD_0 + ln USD→LKR_h/USD→LKR_0), made on the same anchor. Legs run first (`PREDICT_ORDER`).
+- `cbsl_gap` model (shadow, LKR pairs only; `CBSL_FIXING` maps LKR→`lk_sgd_ind`, USDLKR→`lk_usd_spot`):
+  gap(t) = ln(fixing at t−1 / Wise at t) (this beat the same-day gap at t−1: corr 0.47 vs 0.33 with the next
+  5 days). Per horizon h, a no-intercept regression over the past 365 anchors whose target i+h is already
+  known (≥ 120 obs), shrunk toward 0 (`GAP_SHRINK` 60), β clamped to [−1, 1.5]. Forecast = today + β·gap.
+  2026-11-13 replay: SGD→LKR 8–14d 0.613 vs naive 0.627 (−2.3%), out-of-sample 7d −5.7%; USD→LKR worse.
+  Not yet significant, so weight 0. Tests: `tests/predict-cbsl-gap.test.ts` (incl. a no-look-ahead check).
 - Learning window 180 days, replay 365 days (`BACKFILL_DAYS`). The replay is time-boxed
   (`REPLAY_BUDGET_MS`, 40 s) and resumes on the next run. Locally set `REPLAY_BUDGET_MS=100000000` for a full run.
 - **No look-ahead** in anything you add: inputs restricted to `<= anchorDate` (basket `< anchorDate` in replay).
   Macro factors: `factorsAt(all, anchor)` keeps `date <= anchor − lagDays` in **both** replay and live. Set
   `lagDays` from the observed publication delay, and never lower it to make a backtest look better.
 - Every model change must be backtested (`.claude/skills/backtest`). Ship it only if `ensemble` MAE is no worse
-  than before in every bucket, for both currencies. Record the new numbers in `docs/CONTEXT.md`.
+  than before in every bucket, for all three pairs (`LKR`, `USD`, `USDLKR`). Record the new numbers in `docs/CONTEXT.md`.
   - One accepted exception (owner, 2026-11-11): a shadow model that the automatic rule promotes during the
     replay may move a bucket by noise-sized amounts (it was +0.0006 pp for LKR 8–14d). That is the promotion
     rule working, not a failed backtest. A change you make yourself must still meet the rule with promotion
