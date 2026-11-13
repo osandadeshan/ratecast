@@ -49,6 +49,8 @@ only gets weight once it is statistically better than the random walk ("no chang
 | **Market context** | 30-day trend, volatility, US-dollar strength (ECB), US 2-year yield and Brent oil (latest value + 30-day change), and cross-checks against two other rate sources. On the LKR tabs also the Sri Lanka central bank (CBSL) series: official USD/LKR and SGD/LKR rates, policy rate, 3-month T-bill yield, remittances and tourism earnings (year-on-year) |
 | **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart |
 | **Learning panel** | Accuracy by horizon vs a "no change" baseline, recent predicted-vs-actual deltas, current model weights ("not used" until a model is statistically better than "no change"), bias-correction status |
+| **Forecast performance** | Yesterday's forecast vs actual, today's forecast vs the live rate; MAPE, RMSE and MAE over 7/30/90 days next to the random walk; error by horizon (1/7/14/30 days) with how often the actual fell inside the 80% range; bias (too high/too low, only when statistically clear); improving/deteriorating vs the baseline; 30-day outlook (a direction only when today's rate is outside the forecast's 80% range); model version, training date, history coverage, live vs replayed forecast counts and the hardest pair |
+| **Data sources** | Freshness of every ingested series (first/latest date, late flag), scraper health, and the sources deliberately not integrated, with the reason |
 | **Light & dark mode, mobile friendly** | Works at phone width (390px) |
 
 ---
@@ -512,9 +514,10 @@ lib/
                             news.ts, engine.ts (pure, no I/O)
   sync.ts                   The sync pipeline
   dashboard.ts              All read queries for the page
+  performance.ts            Pure accuracy metrics for the Performance card
 scripts/sync.ts             Run a sync from the command line
 vercel.json                 Region sin1 + daily cron
-tests/                      Unit tests (node:test via tsx): parsers, dates, PDF text, events, news, cbsl_gap
+tests/                      Unit tests (node:test via tsx): parsers, dates, PDF text, events, news, cbsl_gap, validation, performance
 docs/                       ARCHITECTURE.md, CONTEXT.md
 AGENTS.md, CLAUDE.md, .claude/   Guidance for AI coding agents (rules, skills, lint hook)
 ```

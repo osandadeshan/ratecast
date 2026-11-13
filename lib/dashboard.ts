@@ -1,7 +1,8 @@
 import { cacheLife } from "next/cache";
-import { DECIMALS, HORIZON_BUCKETS, MACRO_FACTORS, PAIRS, SRI_LANKA_META, TARGETS, type Target, bucketOf } from "./config";
+import { DECIMALS, HORIZON_BUCKETS, MODEL_VERSION, MACRO_FACTORS, PAIRS, SRI_LANKA_META, TARGETS, type Target, bucketOf } from "./config";
 import { addDays, addMonths, dateRange, monthBounds, todayISO } from "./dates";
 import { db, ensureSchema, hasDb } from "./db";
+import { type Performance, type ScoredRow, computePerformance, direction } from "./performance";
 import { EVENT_KINDS, type EventKind } from "./predict/events";
 import type { LearnedStats } from "./predict/learning";
 import { type CrossCheck } from "./sources/market";
@@ -77,6 +78,23 @@ export interface CurrencyDashboard {
   recentDeltas: DeltaRow[];
   accuracy: AccuracyRow[];
   stats: LearnedStats | null;
+  /** Rolling accuracy (7/30/90 days), 1/7/14/30-day horizons, bias, trend. null without data. */
+  performance: Performance | null;
+  /** Yesterday's next-day forecast vs Wise's rate for yesterday, and today's forecast vs the live rate. */
+  daily: {
+    yesterday: { date: string; predicted: number; actual: number; madeOn: string; origin: string | null } | null;
+    today: { date: string; predicted: number; live: number | null; madeOn: string } | null;
+  };
+  /** Where the 30-day forecast points (only a direction if today's rate is outside its 80% range). */
+  outlook: "up" | "down" | "no clear direction" | null;
+  /** Which models currently carry weight, and the model version that made today's forecast. */
+  model: {
+    active: string[];
+    version: string | null;
+    trainedOn: string | null;
+    historyFrom: string | null;
+    historyDays: number;
+  };
   market: {
     trend30dPct: number | null;
     vol30dPct: number | null;
@@ -85,8 +103,26 @@ export interface CurrencyDashboard {
   };
 }
 
+export interface SeriesFreshness {
+  series: string;
+  label: string;
+  feeds: string;
+  first: string | null;
+  latest: string | null;
+  points: number;
+  ageDays: number | null;
+  late: boolean;
+}
+
 export interface Dashboard {
   today: string;
+  /** Every stored series: coverage and freshness. */
+  freshness: SeriesFreshness[];
+  notIntegrated: typeof NOT_INTEGRATED;
+  /** Version of the forecasting code serving this page. */
+  modelVersion: string;
+  /** Pair with the highest 30-day next-day error relative to the random walk on it (null: not enough data). */
+  hardest: { target: Target; label: string; mape: number; naiveMape: number | null } | null;
   monthLabel: string;
   dbConfigured: boolean;
   lastSync: { at: string; status: string; message: string | null } | null;
@@ -122,7 +158,41 @@ const SOURCE_LABEL: Record<string, string> = {
   "wise-history:USD": "Wise SGD → USD history",
   "wise-history:USDLKR": "Wise USD → LKR history",
   outcomes: "Decision outcomes (statements)",
+  "wise-live:LKR": "Wise live SGD → LKR",
+  "wise-live:USD": "Wise live SGD → USD",
+  "wise-live:USDLKR": "Wise live USD → LKR",
+  "cross-rate": "Cross-rate check (SGD→LKR = SGD→USD × USD→LKR)",
 };
+
+/**
+ * Every data series the app stores, with what it feeds and its newest data date. `maxAgeDays` is the
+ * age beyond which the data counts as late (publication delay + slack); monthly CBSL tables lag 1–2 months.
+ */
+const SERIES_CATALOG: { series: string; table: "rates" | "market"; label: string; feeds: string; maxAgeDays: number }[] = [
+  { series: "LKR", table: "rates", label: "Wise SGD → LKR daily rate", feeds: "actuals, every model", maxAgeDays: 3 },
+  { series: "USD", table: "rates", label: "Wise SGD → USD daily rate", feeds: "actuals, every model", maxAgeDays: 3 },
+  { series: "USDLKR", table: "rates", label: "Wise USD → LKR daily rate", feeds: "actuals, every model", maxAgeDays: 3 },
+  { series: "usd_basket", table: "market", label: "ECB reference rates (USD basket)", feeds: "market model", maxAgeDays: 5 },
+  { series: "ust2y", table: "market", label: "US Treasury 2-year yield", feeds: "macro model", maxAgeDays: 5 },
+  { series: "brent", table: "market", label: "Brent oil (FRED)", feeds: "macro model", maxAgeDays: 14 },
+  { series: "lk_usd_spot", table: "market", label: "CBSL USD/LKR indicative rate", feeds: "lanka, cbsl_gap", maxAgeDays: 5 },
+  { series: "lk_sgd_ind", table: "market", label: "CBSL SGD/LKR indicative rate", feeds: "lanka, cbsl_gap", maxAgeDays: 5 },
+  { series: "lk_opr", table: "market", label: "CBSL policy rate", feeds: "lanka", maxAgeDays: 100 },
+  { series: "lk_tbill3m", table: "market", label: "Sri Lanka 3-month T-bill yield", feeds: "lanka", maxAgeDays: 100 },
+  { series: "lk_remit", table: "market", label: "Sri Lanka workers' remittances", feeds: "lanka", maxAgeDays: 100 },
+  { series: "lk_tourism", table: "market", label: "Sri Lanka tourism earnings", feeds: "lanka", maxAgeDays: 100 },
+];
+
+/** Sources looked at and not used, with the reason. Shown so nothing is implied to be integrated. */
+export const NOT_INTEGRATED: { name: string; reason: string }[] = [
+  { name: "MAS (Singapore) statements and data", reason: "statement links aren't in the page HTML and the data API is in maintenance; being investigated" },
+  { name: "CBSL foreign reserves", reason: "only in a weekly PDF the built-in reader can't extract" },
+  { name: "Sri Lanka and Singapore inflation (CPI)", reason: "not added yet: monthly, published weeks late; candidate input under test" },
+  { name: "US inflation and jobs reports", reason: "not added yet: planned as release-day events that widen the range" },
+  { name: "US dollar index (DXY)", reason: "proprietary; the free Fed broad dollar index is a planned candidate" },
+  { name: "Financial news and sentiment", reason: "no reliable keyless feed with history to test against (GDELT times out, news RSS blocked)" },
+  { name: "IMF and World Bank data", reason: "yearly figures, too slow for daily rates; IMF programme news is used as events" },
+];
 
 function eventView(r: {
   kind: string;
@@ -173,6 +243,10 @@ export async function getDashboard(): Promise<Dashboard> {
     );
     return {
       today,
+      modelVersion: MODEL_VERSION,
+      hardest: null,
+      freshness: [],
+      notIntegrated: NOT_INTEGRATED,
       monthLabel,
       dbConfigured: false,
       lastSync: null,
@@ -187,7 +261,7 @@ export async function getDashboard(): Promise<Dashboard> {
   const [lastSync] = await sql`
     SELECT finished_at, started_at, status, message FROM sync_runs ORDER BY id DESC LIMIT 1`;
 
-  const [eventRows, healthRows, macroRows] = await Promise.all([
+  const [eventRows, healthRows, macroRows, coverRows] = await Promise.all([
     sql`SELECT kind, event_date::text AS event_date, title, url, outcome FROM events
         WHERE known_since <= ${today}
           AND event_date BETWEEN ${addDays(today, -45)} AND ${addDays(today, 75)}
@@ -197,7 +271,27 @@ export async function getDashboard(): Promise<Dashboard> {
         WHERE series = ANY(${[...MACRO_FACTORS, ...SRI_LANKA_META].map((f) => f.series as string)})
           AND date >= ${addDays(today, -500)}
         ORDER BY date`,
+    sql`SELECT 'rates' AS t, currency AS series, min(date)::text AS first, max(date)::text AS latest, count(*)::int AS n
+          FROM rates_history WHERE source = 'wise' GROUP BY currency
+        UNION ALL
+        SELECT 'market', series, min(date)::text, max(date)::text, count(*)::int
+          FROM market_data WHERE series NOT LIKE 'xc:%' GROUP BY series`,
   ]);
+  const dayMs = 86_400_000;
+  const freshness: SeriesFreshness[] = SERIES_CATALOG.map((c) => {
+    const r = coverRows.find((x) => x.t === c.table && x.series === c.series);
+    const ageDays = r?.latest ? Math.round((Date.parse(today) - Date.parse(r.latest)) / dayMs) : null;
+    return {
+      series: c.series,
+      label: c.label,
+      feeds: c.feeds,
+      first: r?.first ?? null,
+      latest: r?.latest ?? null,
+      points: r?.n ?? 0,
+      ageDays,
+      late: ageDays === null || ageDays > c.maxAgeDays,
+    };
+  });
   const macro: Dashboard["macro"] = [];
   const FORMAT: Record<string, Dashboard["macro"][number]["format"]> = {
     brent: "usd",
@@ -248,8 +342,20 @@ export async function getDashboard(): Promise<Dashboard> {
   });
 
   const currencies = await Promise.all(TARGETS.map((t) => currencyDashboard(t, today, start, end, monthEvents)));
+  // Hardest pair: highest next-day error over the last 30 days (raw %, the error a user feels).
+  const ranked = currencies
+    .map((c) => ({ c, w: c.performance?.windows.find((w) => w.days === 30) }))
+    .filter((x) => x.w && x.w.n >= 10 && x.w.mape != null)
+    .sort((a, b) => b.w!.mape! - a.w!.mape!);
+  const hardest = ranked[0]
+    ? { target: ranked[0].c.target, label: ranked[0].c.label, mape: ranked[0].w!.mape!, naiveMape: ranked[0].w!.naiveMape }
+    : null;
   return {
     today,
+    modelVersion: MODEL_VERSION,
+    hardest,
+    freshness,
+    notIntegrated: NOT_INTEGRATED,
     monthLabel,
     dbConfigured: true,
     lastSync: lastSync
@@ -298,6 +404,10 @@ function emptyCurrency(target: Target, live: LiveQuote | null, start: string, en
     recentDeltas: [],
     accuracy: [],
     stats: null,
+    performance: null,
+    daily: { yesterday: null, today: null },
+    outlook: null,
+    model: { active: [], version: null, trainedOn: null, historyFrom: null, historyDays: 0 },
     market: { trend30dPct: null, vol30dPct: null, usdBasket30dPct: null, crossChecks: [] },
   };
 }
@@ -311,7 +421,7 @@ async function currencyDashboard(
 ): Promise<CurrencyDashboard> {
   const sql = db();
   const histFrom = addMonths(start, -1);
-  const [history, preds, deltas, errAgg, statsRow, basketRows, crossRows, liveFresh, dbLive] = await Promise.all([
+  const [history, preds, deltas, errAgg, statsRow, basketRows, crossRows, liveFresh, dbLive, scored, cover, todayPred] = await Promise.all([
     sql`SELECT date::text AS date, rate, source FROM rates_history
         WHERE currency = ${target} AND date >= ${addDays(histFrom, -35)} AND date <= ${end} ORDER BY date`,
     // For each day of the month: the most recent final forecast made BEFORE that day.
@@ -340,6 +450,16 @@ async function currencyDashboard(
     liveQuote(target),
     sql`SELECT date::text AS date, mid_rate, providers, fetched_at FROM live_quotes
         WHERE currency = ${target} ORDER BY fetched_at DESC LIMIT 1`,
+    // Scored final + baseline forecasts for the performance panel (horizons 1/7/14/30, last ~120 days).
+    sql`SELECT e.model, e.horizon, e.made_on::text AS made_on, e.target_date::text AS target_date,
+               e.predicted, e.actual, e.pct_error, p.lower80, p.upper80, p.origin
+        FROM prediction_errors e JOIN predictions p ON p.id = e.prediction_id
+        WHERE e.currency = ${target} AND e.model IN ('ensemble', 'naive') AND e.horizon IN (1, 7, 14, 30)
+          AND e.target_date > ${addDays(today, -120)}`,
+    sql`SELECT min(date)::text AS first, count(*)::int AS n FROM rates_history WHERE currency = ${target} AND source = 'wise'`,
+    sql`SELECT made_on::text AS made_on, model_version, predicted, lower80, upper80 FROM predictions
+        WHERE currency = ${target} AND model = 'ensemble' AND made_on = ${today} AND horizon IN (1, 30)
+        ORDER BY horizon`,
   ]);
 
   const rates = new Map<string, { rate: number; source: string }>();
@@ -468,10 +588,48 @@ async function currencyDashboard(
     });
   }
 
+  const stats = (statsRow[0]?.stats as LearnedStats | undefined) ?? null;
+  const rows: ScoredRow[] = scored.map((r) => ({
+    model: r.model,
+    horizon: r.horizon,
+    madeOn: r.made_on,
+    targetDate: r.target_date,
+    predicted: r.predicted,
+    actual: r.actual,
+    pct: r.pct_error,
+    lower80: r.lower80,
+    upper80: r.upper80,
+    origin: r.origin,
+  }));
+  const performance = rows.length ? computePerformance(rows, today, stats?.nonTradingDow ?? [0]) : null;
+  const y = rows
+    .filter((r) => r.model === "ensemble" && r.horizon === 1)
+    .sort((a, b) => b.targetDate.localeCompare(a.targetDate))[0];
+  const p30 = todayPred.length > 1 ? todayPred[todayPred.length - 1] : undefined; // horizon 30
+  const tp1 = predBy.get(today);
+  const active = stats
+    ? [...new Set(stats.buckets.flatMap((b) => Object.entries(b.weights).filter(([, w]) => w > 0.005).map(([m]) => m)))]
+    : [];
+
   return {
     target,
     ...pairInfo(target),
     decimals: DECIMALS[target],
+    performance,
+    daily: {
+      yesterday: y ? { date: y.targetDate, predicted: y.predicted, actual: y.actual, madeOn: y.madeOn, origin: y.origin } : null,
+      today: tp1
+        ? { date: today, predicted: tp1.predicted, live: live?.date === today ? live.midRate : null, madeOn: tp1.made_on }
+        : null,
+    },
+    outlook: direction(live?.midRate, p30?.predicted, p30?.lower80, p30?.upper80),
+    model: {
+      active,
+      version: todayPred[0]?.model_version ?? null,
+      trainedOn: stats?.asOf ?? null,
+      historyFrom: cover[0]?.first ?? null,
+      historyDays: cover[0]?.n ?? 0,
+    },
     live,
     liveSource,
     previousClose: prevDate ? { date: prevDate, rate: rates.get(prevDate)!.rate } : null,
@@ -489,7 +647,7 @@ async function currencyDashboard(
       pctError: d.pct_error,
     })),
     accuracy,
-    stats: (statsRow[0]?.stats as LearnedStats) ?? null,
+    stats,
     market: { trend30dPct, vol30dPct, usdBasket30dPct, crossChecks },
   };
 }

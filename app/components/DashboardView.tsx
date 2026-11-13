@@ -53,6 +53,7 @@ export default function DashboardView({ data }: { data: Dashboard }) {
 
       <TodaySection c={c} />
       <ChartSection c={c} today={data.today} monthLabel={data.monthLabel} />
+      <PerformanceCard c={c} hardest={data.hardest} codeVersion={data.modelVersion} />
       <div className="grid lg:grid-cols-5 gap-6">
         <div className="lg:col-span-3 space-y-6 min-w-0">
           <MonthTable c={c} />
@@ -64,6 +65,7 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         </div>
       </div>
       <LearningSection c={c} />
+      <SourcesCard data={data} />
 
       <footer className="text-xs text-ink-3 pb-6 space-y-1">
         <p>
@@ -649,5 +651,274 @@ function WeightCell({ w, mae, unused }: { w: number; mae: number | null; unused?
       </span>
       <span className="num text-xs w-8">{Math.round(w * 100)}%</span>
     </span>
+  );
+}
+
+const signed = (n: number, d: number) => `${n > 0 ? "+" : ""}${fmt(n, d)}`;
+
+/** Yesterday's forecast vs actual, today's forecast vs the live rate, and rolling accuracy for this pair. */
+function PerformanceCard({
+  c,
+  hardest,
+  codeVersion,
+}: {
+  c: CurrencyDashboard;
+  hardest: Dashboard["hardest"];
+  codeVersion: string;
+}) {
+  const d = c.decimals;
+  const p = c.performance;
+  const y = c.daily.yesterday;
+  const t = c.daily.today;
+  const yDelta = y ? y.predicted - y.actual : null;
+  const tDelta = t && t.live != null ? t.predicted - t.live : null;
+  const verdict = (x: number | null) => (x == null ? "" : x > 0 ? "too high" : x < 0 ? "too low" : "exact");
+  const usesBaseline = c.model.active.length === 0 || (c.model.active.length === 1 && c.model.active[0] === "naive");
+  return (
+    <section className="card p-4 sm:p-6 min-w-0" aria-label="Daily performance">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-lg font-semibold">{c.label} · daily performance</h2>
+        <span className="text-xs text-ink-3">Delta = predicted − actual (+ = forecast too high)</span>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <div className="rounded-xl bg-surface-2 p-3 min-w-0">
+          <div className="text-xs text-ink-3 uppercase tracking-wide">
+            Yesterday{y ? ` · ${shortDate(y.date)}` : ""}
+          </div>
+          {y ? (
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-sm">
+              <dt className="text-ink-3">Predicted</dt>
+              <dd className="num text-right">{fmt(y.predicted, d)}</dd>
+              <dt className="text-ink-3">Actual (Wise)</dt>
+              <dd className="num text-right">{fmt(y.actual, d)}</dd>
+              <dt className="text-ink-3">Delta</dt>
+              <dd className="num text-right font-medium">
+                {signed(yDelta!, d)} <span className="text-ink-3 text-xs">{verdict(yDelta)}</span>
+              </dd>
+              <dt className="text-ink-3">Error</dt>
+              <dd className="num text-right">{pct(Math.abs((yDelta! / y.actual) * 100), 3, false)}</dd>
+              <dd className="col-span-2 text-xs text-ink-3">
+                Forecast made {shortDate(y.madeOn)}
+                {y.origin === "replay" ? " (rebuilt by the replay from data known that day)" : " (live)"}
+              </dd>
+            </dl>
+          ) : (
+            <p className="text-sm text-ink-3 mt-2">No scored next-day forecast yet.</p>
+          )}
+        </div>
+        <div className="rounded-xl bg-surface-2 p-3 min-w-0">
+          <div className="text-xs text-ink-3 uppercase tracking-wide">Today · {shortDate(c.month.find((m) => m.kind === "today")?.date ?? "")}</div>
+          {t ? (
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-sm">
+              <dt className="text-ink-3">Predicted</dt>
+              <dd className="num text-right">{fmt(t.predicted, d)}</dd>
+              <dt className="text-ink-3">Live (provisional)</dt>
+              <dd className="num text-right">{fmt(t.live, d)}</dd>
+              <dt className="text-ink-3">Delta so far</dt>
+              <dd className="num text-right font-medium">
+                {tDelta == null ? "—" : signed(tDelta, d)}{" "}
+                <span className="text-ink-3 text-xs">{verdict(tDelta)}</span>
+              </dd>
+              <dd className="col-span-2 text-xs text-ink-3">
+                Final once Wise publishes today&apos;s daily rate (tomorrow). Forecast made {shortDate(t.madeOn)}.
+              </dd>
+            </dl>
+          ) : (
+            <p className="text-sm text-ink-3 mt-2">No forecast was made for today.</p>
+          )}
+        </div>
+      </div>
+
+      {p && (
+        <div className="grid lg:grid-cols-2 gap-6 mt-6 [&>*]:min-w-0">
+          <div>
+            <h3 className="text-sm font-semibold mb-2">Next-day forecasts, rolling</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[320px]">
+                <thead className="text-xs text-ink-3 text-left">
+                  <tr className="border-b border-line">
+                    <th className="font-medium py-1.5">Window</th>
+                    <th className="font-medium py-1.5 text-right" title="Mean absolute % error">MAPE</th>
+                    <th className="font-medium py-1.5 text-right" title="Root mean squared % error">RMSE</th>
+                    <th className="font-medium py-1.5 text-right" title="Mean absolute error in rate units">MAE</th>
+                    <th className="font-medium py-1.5 text-right" title="'Tomorrow = today', same days">Random walk</th>
+                    <th className="font-medium py-1.5 text-right">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.windows.map((w) => (
+                    <tr key={w.days} className="border-b border-line last:border-0">
+                      <td className="py-1.5">Last {w.days} days</td>
+                      <td className="num py-1.5 text-right font-medium">{pct(w.mape, 3, false)}</td>
+                      <td className="num py-1.5 text-right">{pct(w.rmse, 3, false)}</td>
+                      <td className="num py-1.5 text-right">{fmt(w.mae, d)}</td>
+                      <td className="num py-1.5 text-right text-ink-2">{pct(w.naiveMape, 3, false)}</td>
+                      <td className="num py-1.5 text-right text-ink-3">{w.n}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold mb-2">By horizon, last 90 days</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[320px]">
+                <thead className="text-xs text-ink-3 text-left">
+                  <tr className="border-b border-line">
+                    <th className="font-medium py-1.5">Ahead</th>
+                    <th className="font-medium py-1.5 text-right">MAPE</th>
+                    <th className="font-medium py-1.5 text-right">RMSE</th>
+                    <th className="font-medium py-1.5 text-right">Random walk</th>
+                    <th className="font-medium py-1.5 text-right" title="Share of actual rates inside the 80% range; ~80% is right">In 80% range</th>
+                    <th className="font-medium py-1.5 text-right">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.horizons.map((h) => (
+                    <tr key={h.horizon} className="border-b border-line last:border-0">
+                      <td className="py-1.5">{h.horizon === 1 ? "1 day" : `${h.horizon} days`}</td>
+                      <td className="num py-1.5 text-right font-medium">{pct(h.mape, 3, false)}</td>
+                      <td className="num py-1.5 text-right">{pct(h.rmse, 3, false)}</td>
+                      <td className="num py-1.5 text-right text-ink-2">{pct(h.naiveMape, 3, false)}</td>
+                      <td className="num py-1.5 text-right">{h.coverage == null ? "—" : `${h.coverage.toFixed(0)}%`}</td>
+                      <td className="num py-1.5 text-right text-ink-3">{h.n}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {p && (
+        <dl className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6 text-sm">
+          <div>
+            <dt className="text-xs text-ink-3">Systematic bias (next day, 90d)</dt>
+            <dd className="font-medium">
+              {p.bias.verdict === "none" ? "none detected" : p.bias.verdict === "not enough data" ? "not enough data" : `consistently ${p.bias.verdict}`}
+            </dd>
+            <dd className="text-xs text-ink-3 num">
+              mean {pct(p.bias.meanPct, 3)}
+              {p.bias.t != null ? ` · t = ${p.bias.t.toFixed(1)}` : ""}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-3">Accuracy trend vs random walk</dt>
+            <dd className="font-medium">{p.trend.verdict}</dd>
+            <dd className="text-xs text-ink-3 num">
+              last 30d {pct(p.trend.recent, 3)} · prior 30d {pct(p.trend.prior, 3)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-3">30-day outlook</dt>
+            <dd className="font-medium">
+              {c.outlook === "up" ? `${c.quote} weakening (rate up)` : c.outlook === "down" ? `${c.quote} strengthening (rate down)` : c.outlook ?? "—"}
+            </dd>
+            <dd className="text-xs text-ink-3">a direction only when today&apos;s rate is outside the forecast&apos;s 80% range</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-3">Model status</dt>
+            <dd className="font-medium">{usesBaseline ? "Random walk (no model validated yet)" : "Validated blend"}</dd>
+            <dd className="text-xs text-ink-3">
+              {usesBaseline
+                ? "Candidates are scored daily; one switches on only after beating the random walk significantly."
+                : `Using: ${c.model.active.map((m) => MODEL_LABELS[m] ?? m).join(", ")}`}
+            </dd>
+          </div>
+        </dl>
+      )}
+
+      <p className="text-xs text-ink-3 mt-4">
+        Model version {c.model.version ?? `${codeVersion} (today's forecast predates version tags)`} · trained {c.model.trainedOn ? shortDate(c.model.trainedOn) : "—"} · rate
+        history since {c.model.historyFrom ? shortDate(c.model.historyFrom) : "—"} ({c.model.historyDays} days)
+        {p && (
+          <>
+            {" "}· last 90 days scored: {p.origin.live} live forecasts, {p.origin.replay} rebuilt by the replay
+          </>
+        )}
+        {hardest && (
+          <>
+            {" "}· hardest pair (30-day next-day error): <span className="text-ink-2">{hardest.label}</span>{" "}
+            {pct(hardest.mape, 3, false)}
+          </>
+        )}
+      </p>
+    </section>
+  );
+}
+
+/** Every stored series: what it feeds, history coverage, newest data, and what isn't integrated. */
+function SourcesCard({ data }: { data: Dashboard }) {
+  const broken = data.events.health.filter((h) => !h.ok);
+  return (
+    <section className="card p-4 sm:p-6 min-w-0" aria-label="Data sources">
+      <h2 className="text-lg font-semibold">Data sources and freshness</h2>
+      <p className="text-xs text-ink-3 mt-0.5 mb-3">
+        What is actually integrated, how far back it goes and how recent it is. &ldquo;Late&rdquo; means older than that
+        source normally is; forecasts then rely on older data for that input.
+      </p>
+      <div className="overflow-x-auto -mx-4 sm:mx-0 px-4 sm:px-0">
+        <table className="w-full text-sm min-w-[560px]">
+          <thead className="text-xs text-ink-3 text-left">
+            <tr className="border-b border-line">
+              <th className="font-medium py-1.5">Series</th>
+              <th className="font-medium py-1.5">Feeds</th>
+              <th className="font-medium py-1.5 text-right">History from</th>
+              <th className="font-medium py-1.5 text-right">Latest data</th>
+              <th className="font-medium py-1.5 text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.freshness.map((f) => (
+              <tr key={f.series} className="border-b border-line last:border-0">
+                <td className="py-1.5">{f.label}</td>
+                <td className="py-1.5 text-ink-3 text-xs">{f.feeds}</td>
+                <td className="num py-1.5 text-right text-ink-2">{f.first ? shortDate(f.first) + " " + f.first.slice(0, 4) : "—"}</td>
+                <td className="num py-1.5 text-right">
+                  {f.latest ? shortDate(f.latest) : "—"}
+                  {f.ageDays != null && <span className="text-ink-3 text-xs"> · {f.ageDays}d</span>}
+                </td>
+                <td className="py-1.5 text-right text-xs">
+                  {f.late ? <span style={{ color: "var(--critical)" }}>late</span> : <span style={{ color: "var(--good-text)" }}>ok</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="grid lg:grid-cols-2 gap-6 mt-4 [&>*]:min-w-0">
+        <div>
+          <h3 className="text-sm font-semibold mb-1">Scrapers and checks</h3>
+          <ul className="text-xs space-y-1">
+            {data.events.health.map((h) => (
+              <li key={h.source} className="flex justify-between gap-3">
+                <span className="text-ink-2 truncate">{h.label}</span>
+                <span className="whitespace-nowrap" style={{ color: h.ok ? "var(--good-text)" : "var(--critical)" }}>
+                  {h.ok ? "ok" : "failing"} · {h.lastOkAt ? shortDate(h.lastOkAt.slice(0, 10)) : "never"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {broken.length > 0 && (
+            <p className="text-xs mt-2" style={{ color: "var(--critical)" }}>
+              {broken.length} source(s) failing. Forecasts carry on with the data already stored.
+            </p>
+          )}
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold mb-1">Not integrated (and why)</h3>
+          <ul className="text-xs space-y-1.5">
+            {data.notIntegrated.map((n) => (
+              <li key={n.name}>
+                <span className="text-ink-2">{n.name}</span> <span className="text-ink-3">· {n.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </section>
   );
 }

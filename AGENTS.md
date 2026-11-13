@@ -31,7 +31,7 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
-| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 59 tests) |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 73 tests) |
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
 
@@ -62,6 +62,8 @@ lib/predict/                  series helpers, calendar (detects non-trading week
                               shadow `news` model), engine (forecast)
 lib/sync.ts                   Orchestration of a sync run, incl. no-lookahead replay of missed days
 lib/dashboard.ts              All read queries for the page
+lib/performance.ts            Pure metrics for the Performance card: MAPE/RMSE/MAE vs random walk (7/30/90 d),
+                              horizons 1/7/14/30 + 80% coverage, bias t-test, trend vs baseline, outlook
 scripts/sync.ts               CLI wrapper for runSync()
 tests/                        Unit tests for the pure code (node:test)
 vercel.json                   Functions in sin1 (Singapore, next to Neon); cron /api/cron/sync at 01:30 UTC (09:30 SGT)

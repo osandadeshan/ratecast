@@ -222,6 +222,15 @@ outcome (`COALESCE(events.outcome, EXCLUDED.outcome)`).
   day (`DISTINCT ON target_date ORDER BY made_on DESC`); the rate on the same day last month.
 - The accuracy panel: `ensemble` vs `naive` MAE per bucket over the last 60 days, plus % of forecasts
   within 0.25%.
+- Performance card (`lib/performance.ts`, pure): one query of scored `ensemble` + `naive` forecasts at
+  horizons 1/7/14/30 for the last 120 days (joined to the prediction for its 80% band and `origin`).
+  Non-trading weekdays are dropped. It gives MAPE/RMSE/MAE vs the random walk on the same dates over
+  7/30/90 days (next-day), per-horizon error + 80% coverage over 90 days, a bias t-test (|t| > 2) on signed
+  next-day errors, and a trend verdict: |error| − |random-walk error| for the last 30 days vs the prior 30
+  (Welch t, |t| > 2). The outlook only names a direction when today's rate is outside the 30-day forecast's
+  80% range. `.hardest` = pair with the highest 30-day next-day MAPE (n ≥ 10).
+- Data sources card: `.freshness` (first/latest date per series vs a max age from `SERIES_CATALOG`),
+  `source_health`, and the static `NOT_INTEGRATED` list.
 - The live quote is fetched per request through `"use cache"` (revalidate 5 min). It falls back to the
   latest `live_quotes` row.
 - Policy events: one query for events with `known_since ≤ today` within −45/+75 days (`.events.upcoming`,

@@ -24,3 +24,8 @@ paths:
   `cbsl_gap`: LKR + USDLKR; `cross`: LKR). Add new pair-specific models there. Gated models show "not used".
 - Sri Lanka series in Market context come from `SRI_LANKA_META` (`lib/config.ts`) via `lib/dashboard.ts`.
 - Copy is plain and honest. Never imply guaranteed predictions. Keep the "not financial advice" footer.
+- `PerformanceCard` (after the chart) and `SourcesCard` (after Learning) read `c.performance`, `c.daily`,
+  `c.outlook`, `c.model`, `data.hardest`, `data.freshness`, `data.notIntegrated`. Every error figure sits next
+  to the random walk's on the same dates. Bias, trend and outlook show a verdict only when it passes the
+  test in `lib/performance.ts`, otherwise "none"/"no clear change"/"no clear direction". Delta wording is
+  predicted − actual ("too high" / "too low").
