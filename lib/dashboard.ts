@@ -16,7 +16,7 @@ export interface MonthDay {
   lower80: number | null;
   upper80: number | null;
   madeOn: string | null;
-  delta: number | null; // actual - predicted
+  delta: number | null; // predicted − actual (positive = forecast was too high)
   pctError: number | null;
   lastMonth: number | null; // rate on the same day-of-month last month
   events: string[]; // short labels of policy events announced on this date ("Fed", "CBSL")
@@ -374,7 +374,7 @@ async function currencyDashboard(
     const p = predBy.get(date);
     const lm = rates.get(addMonths(date, -1));
     const predicted = p?.predicted ?? null;
-    const delta = actual !== null && predicted !== null && !provisional ? actual - predicted : null;
+    const delta = actual !== null && predicted !== null && !provisional ? predicted - actual : null;
     return {
       date,
       kind,
@@ -484,7 +484,8 @@ async function currencyDashboard(
       madeOn: d.made_on,
       predicted: d.predicted,
       actual: d.actual,
-      delta: d.delta,
+      // Shown as predicted − actual (the stored column is actual − predicted and is never changed).
+      delta: d.predicted - d.actual,
       pctError: d.pct_error,
     })),
     accuracy,

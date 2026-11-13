@@ -22,12 +22,12 @@ paths:
   | `rates_history` | ingest | `source` = `wise` (official) or `wise_live` (provisional today) |
   | `live_quotes` | ingest | provider comparison JSON, pruned after 60 days |
   | `market_data` | ingest | `usd_basket`, `xc:<CUR>:<source>` cross-checks, `ust2y` (Treasury 2y %, US date), `brent` (FRED USD/bbl), CBSL `lk_usd_spot`, `lk_sgd_ind` (daily fixings), `lk_opr`, `lk_tbill3m` (%), `lk_remit`, `lk_tourism` (USD mn, dated to month start) |
-  | `predictions` | predict | unique (currency, made_on, target_date, model); pruned after ~400 days |
+  | `predictions` | predict | unique (currency, made_on, target_date, model); **write-once** (`DO NOTHING`). `origin` live/replay, `model_version`. `ensemble`/`naive` kept forever, other models pruned after 550 days |
   | `prediction_errors` | evaluate SQL | the delta table; FK cascade from predictions |
   | `model_stats` | predict | JSON of `LearnedStats` per currency per day |
   | `events` | `ingestEvents` + `classifyOutcomes` (sync) | PK (kind, event_date). `known_since` gates replay (upsert keeps `LEAST`). `outcome` (added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`): `cut`/`hold`/`hike`, `sla`/`board`/`other`, `unclear`, or NULL until classified; the upsert never overwrites it. ~10 rows/year/kind |
-  | `source_health` | `recordHealth` (sync) | PK source. Last ok / error / note per automatic source: fed-page, fed-json, cbsl-mpr, cbsl-rss, treasury, fred-brent, cbsl-fx, cbsl-rates, cbsl-external |
-  | `sync_runs`, `sync_lock` | runSync | lock row expires after 5 min |
+  | `source_health` | `recordHealth` (sync) | PK source. Last ok / error / note per automatic source: fed-page, fed-json, cbsl-mpr, cbsl-rss, treasury, fred-brent, cbsl-fx, cbsl-rates, cbsl-external, wise-history:*, wise-live:*, cross-rate |
+  | `sync_runs`, `sync_lock` | runSync | lock row expires after 5 min; `sync_runs.model_version` |
 - **Scoring** (`evaluatePredictions`): `ANALYZE predictions, rates_history` and then one `INSERT … SELECT` inside
   `sql.begin` with `SET LOCAL enable_nestloop = off`. After a 365-day replay (~470k rows) the planner otherwise
   chose nested loops and the insert took 13 min (8 s with the setting). Don't remove it.

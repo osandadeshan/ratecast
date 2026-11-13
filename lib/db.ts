@@ -121,6 +121,16 @@ CREATE TABLE IF NOT EXISTS source_health (
   last_count    int
 );
 
+-- Immutable forecast record (added 2026-11-13). origin: 'live' = made by the run on made_on, 'replay' =
+-- reconstructed later from data known on made_on. model_version: MODEL_VERSION (+ git commit) that wrote it.
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS origin text;
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS model_version text;
+-- Partial index: once every row has an origin it is empty, so the backfill below costs nothing.
+CREATE INDEX IF NOT EXISTS predictions_origin_null ON predictions (id) WHERE origin IS NULL;
+-- Rows written before these columns existed: a row created on its own made_on (SGT) was the live run.
+UPDATE predictions SET origin = CASE WHEN (created_at AT TIME ZONE 'Asia/Singapore')::date = made_on THEN 'live' ELSE 'replay' END
+  WHERE origin IS NULL;
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          bigserial PRIMARY KEY,
   started_at  timestamptz NOT NULL DEFAULT now(),
@@ -129,6 +139,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   status      text NOT NULL DEFAULT 'running',
   message     text
 );
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS model_version text;
 
 CREATE TABLE IF NOT EXISTS sync_lock (
   id        int PRIMARY KEY,

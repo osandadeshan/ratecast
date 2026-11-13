@@ -71,8 +71,19 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
 1. **No look-ahead.** A forecast made on day `t` may only use rates with `date <= t` and the ECB basket
    `< t`. Learned stats at `t` use only errors whose `target_date <= t`. The replay loop in `lib/sync.ts` relies
    on this.
-2. **Actuals are official only.** `prediction_errors` is filled only from `rates_history.source = 'wise'`.
+2. **Forecasts are write-once and permanent.** `insertPredictions` only does `ON CONFLICT DO NOTHING`: a second
+   run on the same day keeps the first forecast. Every row has `origin` (`live` = made on `made_on` by that day's
+   run, `replay` = rebuilt later from data known on `made_on`) and `model_version` (`MODEL_VERSION` in
+   `lib/config.ts`: bump it when lib/predict, learning or inputs change). `ensemble` and `naive` rows are never
+   deleted; other models' rows are pruned after `PRUNE_MODELS_AFTER_DAYS` (550, ~1.5 years, to stay in Neon's
+   0.5 GB). Never update a stored prediction or error to improve reported accuracy.
+2b. **Actuals are official only.** `prediction_errors` is filled only from `rates_history.source = 'wise'`.
    Today's live quote is stored as `source = 'wise_live'` (provisional) and is overwritten by Wise's daily point.
+   Wise data is validated first (`lib/sources/validate.ts`: positive, valid date, daily jump ≤ 20% for LKR pairs /
+   5% for SGD→USD, live quote vs last official point); rejects are dropped and reported in `source_health`
+   (`wise-history:*`, `wise-live:*`). `cross-rate` checks SGD→LKR ≈ SGD→USD × USD→LKR (limit 0.5%).
+   The page shows delta as **predicted − actual** (+ = too high). The stored `prediction_errors.delta` is
+   actual − predicted and stays that way (stored data).
 3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross, cbsl_gap`
    plus the derived `blend` (raw weighted), `blend_bc` (blend with bias correction, always stored as the
    counterfactual) and `ensemble` (the final number shown to users). Renaming a model orphans its history.

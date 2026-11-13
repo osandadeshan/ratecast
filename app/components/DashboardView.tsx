@@ -206,7 +206,7 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
       <div className="px-4 sm:px-6 pt-5 pb-3">
         <h2 className="text-lg font-semibold">Day by day</h2>
         <p className="text-xs text-ink-3 mt-0.5">
-          &ldquo;Predicted&rdquo; for a past day is the latest forecast made before that day; &ldquo;Miss&rdquo; is actual − predicted.
+          &ldquo;Predicted&rdquo; for a past day is the latest forecast made before that day, as stored then; &ldquo;Miss&rdquo; is predicted − actual (+ = forecast too high).
         </p>
       </div>
       <div className="max-h-[560px] overflow-auto">
@@ -246,7 +246,7 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
                 </td>
                 <td className="num px-2 py-2 text-right hidden sm:table-cell">
                   {m.delta !== null ? (
-                    <span title={`${pct(-m.pctError!, 3)} vs prediction`} className="text-ink-2">
+                    <span title={`${pct(m.pctError!, 3)} · forecast too ${m.delta > 0 ? "high" : m.delta < 0 ? "low" : "exact"}`} className="text-ink-2">
                       {m.delta > 0 ? "+" : ""}
                       {fmt(m.delta, d)}
                     </span>
@@ -564,7 +564,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                   <td className="num py-1.5 text-right">{fmt(r.actual, d)}</td>
                   <td className="num py-1.5 text-right">
                     {r.delta > 0 ? "+" : ""}
-                    {fmt(r.delta, d)} <span className="text-ink-3 text-xs">{pct(-r.pctError, 2)}</span>
+                    {fmt(r.delta, d)} <span className="text-ink-3 text-xs">{pct(r.pctError, 2)}</span>
                   </td>
                 </tr>
               ))}

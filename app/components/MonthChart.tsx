@@ -98,7 +98,12 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
                     {p.kind !== "past" && p.lower80 !== null && (
                       <Row label="80% range" value={`${fmt(p.lower80, decimals)} – ${fmt(p.upper80, decimals)}`} />
                     )}
-                    {p.delta !== null && <Row label="Miss" value={`${fmt(p.delta, decimals)} (${pct(-p.pctError!, 3)})`} />}
+                    {p.delta !== null && (
+                      <Row
+                        label={p.delta > 0 ? "Too high by" : p.delta < 0 ? "Too low by" : "Miss"}
+                        value={`${fmt(Math.abs(p.delta), decimals)} (${pct(Math.abs(p.pctError!), 3, false)})`}
+                      />
+                    )}
                     {p.lastMonth !== null && <Row label="Last month" value={fmt(p.lastMonth, decimals)} />}
                     {p.events.length > 0 && <Row label="Policy event" value={p.events.join(", ")} />}
                   </div>

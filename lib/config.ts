@@ -15,6 +15,22 @@ export const PREDICT_ORDER: readonly Target[] = ["USD", "USDLKR", "LKR"];
 /** SGD→LKR = SGD→USD × USD→LKR. */
 export const CROSS_LEGS: Partial<Record<Target, readonly [Target, Target]>> = { LKR: ["USD", "USDLKR"] };
 
+/**
+ * Version of the forecasting code, stored with every prediction and sync run. Bump it whenever
+ * lib/predict, the learning rules or the inputs change, so accuracy can be compared per version.
+ * The git commit is appended on Vercel.
+ */
+export const MODEL_VERSION_BASE = "2026.11.13";
+export const MODEL_VERSION =
+  MODEL_VERSION_BASE + (process.env.VERCEL_GIT_COMMIT_SHA ? `+${process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7)}` : "");
+
+/**
+ * Retention. Final forecasts and the random-walk baseline are kept forever (the permanent record,
+ * ~6 MB/year); every other model's rows are pruned after PRUNE_MODELS_AFTER_DAYS.
+ */
+export const KEEP_FOREVER_MODELS = ["ensemble", "naive"] as const;
+export const PRUNE_MODELS_AFTER_DAYS = 550;
+
 /** Timezone used to decide what "today" is for the user. */
 export const APP_TZ = "Asia/Singapore";
 

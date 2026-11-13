@@ -2,9 +2,12 @@ import {
   BACKFILL_DAYS,
   CROSS_LEGS,
   FACTOR_LAGS,
+  KEEP_FOREVER_MODELS,
   LEARNING_WINDOW_DAYS,
   MAX_HORIZON,
+  MODEL_VERSION,
   PREDICT_ORDER,
+  PRUNE_MODELS_AFTER_DAYS,
   REPLAY_BUDGET_MS,
   TARGETS,
   type Target,
@@ -20,6 +23,7 @@ import { fetchAllEvents, fetchOutcomes } from "./sources/events";
 import { fetchBrent, fetchTreasury2y } from "./sources/macro";
 import { fetchCrossChecks, fetchUsdBasket } from "./sources/market";
 import { SRI_LANKA_SERIES } from "./sources/srilanka";
+import { MAX_CROSS_GAP, crossGap, validateHistory, validateLive } from "./sources/validate";
 import { fetchWiseComparison, fetchWiseHistory } from "./sources/wise";
 
 export interface SyncResult {
@@ -64,7 +68,7 @@ export async function runSync(): Promise<SyncResult> {
     return { status: "skipped", runDate: today, log: ["another sync is running"], ms: Date.now() - t0 };
   }
   const sql = db();
-  const [run] = await sql`INSERT INTO sync_runs (run_date) VALUES (${today}) RETURNING id`;
+  const [run] = await sql`INSERT INTO sync_runs (run_date, model_version) VALUES (${today}, ${MODEL_VERSION}) RETURNING id`;
 
   try {
     // 1. External market data (shared by both currencies)
@@ -94,6 +98,7 @@ export async function runSync(): Promise<SyncResult> {
     for (const target of TARGETS) {
       await ingestCurrency(target, today, log);
     }
+    await checkCrossRate(log);
 
     // 3. Score every prediction whose real rate is now known  (the "delta" table)
     const evaluated = await evaluatePredictions();
@@ -108,8 +113,10 @@ export async function runSync(): Promise<SyncResult> {
     const evaluated2 = await evaluatePredictions();
     if (evaluated2) log.push(`evaluated ${evaluated2} replayed predictions`);
 
-    // 5. Housekeeping: keep a year of predictions
-    await sql`DELETE FROM predictions WHERE target_date < ${addDays(today, -400)}`;
+    // 5. Housekeeping. Final forecasts and the baseline are the permanent record and are never deleted;
+    // the other models' rows (only needed for learning, 180-day window) go after ~1.5 years.
+    await sql`DELETE FROM predictions WHERE target_date < ${addDays(today, -PRUNE_MODELS_AFTER_DAYS)}
+      AND model <> ALL(${[...KEEP_FOREVER_MODELS] as string[]})`;
     await sql`DELETE FROM live_quotes WHERE fetched_at < now() - interval '60 days'`;
 
     // 'partial' keeps needsSync() true, so the next page visit or cron run continues the replay.
@@ -319,8 +326,14 @@ async function ingestCurrency(target: Target, today: string, log: string[]) {
   const [{ n }] = await sql`SELECT count(*)::int AS n FROM rates_history WHERE currency = ${target} AND source = 'wise'`;
   // A failed history fetch must not cost today's forecast: carry on with the stored history.
   try {
-    const history = n < 300 ? await fetchWiseHistory(target, 2, "year") : await fetchWiseHistory(target, 3, "month");
-    if (!history.length) throw new Error("Wise history returned no points");
+    const raw = n < 300 ? await fetchWiseHistory(target, 2, "year") : await fetchWiseHistory(target, 3, "month");
+    if (!raw.length) throw new Error("Wise history returned no points");
+    // Validate against the last stored official point before the fetched window.
+    const [prev] = await sql`
+      SELECT date::text AS date, rate FROM rates_history
+      WHERE currency = ${target} AND source = 'wise' AND date < ${raw[0].date} ORDER BY date DESC LIMIT 1`;
+    const { ok: history, rejected } = validateHistory(target, raw, prev as { date: string; rate: number } | undefined);
+    if (!history.length) throw new Error(`all ${raw.length} Wise points failed validation (${rejected[0]?.reason})`);
     const rows = history.map((h) => ({ currency: target, date: h.date, rate: h.rate, source: "wise" }));
     for (let i = 0; i < rows.length; i += 1000) {
       await sql`
@@ -328,8 +341,9 @@ async function ingestCurrency(target: Target, today: string, log: string[]) {
         ON CONFLICT (currency, date) DO UPDATE SET rate = EXCLUDED.rate, source = 'wise', updated_at = now()`;
     }
     const latest = history.at(-1)?.date;
-    await recordHealth(`wise-history:${target}`, rows.length, undefined, `latest ${latest}`);
-    log.push(`${target}: ${rows.length} history days (latest ${latest})`);
+    const bad = rejected.length ? ` · ${rejected.length} point(s) rejected: ${rejected[0].date} ${rejected[0].reason}` : "";
+    await recordHealth(`wise-history:${target}`, rows.length, undefined, `latest ${latest}${bad}`);
+    log.push(`${target}: ${rows.length} history days (latest ${latest})${bad}`);
   } catch (e) {
     await recordHealth(`wise-history:${target}`, 0, (e as Error).message);
     log.push(`${target}: history failed, using stored rates: ${(e as Error).message}`);
@@ -337,6 +351,11 @@ async function ingestCurrency(target: Target, today: string, log: string[]) {
 
   try {
     const q = await fetchWiseComparison(target);
+    const [last] = await sql`
+      SELECT date::text AS date, rate FROM rates_history
+      WHERE currency = ${target} AND source = 'wise' AND date < ${q.date} ORDER BY date DESC LIMIT 1`;
+    const invalid = validateLive(target, q.midRate, last as { date: string; rate: number } | undefined);
+    if (invalid) throw new Error(`rejected: ${invalid}`);
     await sql`
       INSERT INTO live_quotes (currency, date, mid_rate, providers, fetched_at)
       VALUES (${target}, ${q.date}, ${q.midRate}, ${sql.json(q.providers as never)}, ${q.fetchedAt})`;
@@ -349,7 +368,29 @@ async function ingestCurrency(target: Target, today: string, log: string[]) {
     log.push(`${target}: live mid ${q.midRate}`);
   } catch (e) {
     log.push(`${target}: live quote failed: ${(e as Error).message}`);
+    await recordHealth(`wise-live:${target}`, 0, (e as Error).message);
+    return;
   }
+  await recordHealth(`wise-live:${target}`, 1);
+}
+
+/**
+ * SGD→LKR should equal SGD→USD × USD→LKR (Wise's own quotes agree to < 0.01%). A larger gap on the
+ * latest common official date means one pair's data is stale or wrong: recorded in source_health.
+ */
+async function checkCrossRate(log: string[]) {
+  const [r] = await db()`
+    SELECT a.date::text AS date, a.rate AS lkr, b.rate AS usd, c.rate AS usdlkr
+    FROM rates_history a
+    JOIN rates_history b ON b.currency = 'USD' AND b.date = a.date AND b.source = 'wise'
+    JOIN rates_history c ON c.currency = 'USDLKR' AND c.date = a.date AND c.source = 'wise'
+    WHERE a.currency = 'LKR' AND a.source = 'wise' ORDER BY a.date DESC LIMIT 1`;
+  if (!r) return;
+  const gap = crossGap(r.lkr, r.usd, r.usdlkr);
+  const note = `SGD→LKR vs SGD→USD × USD→LKR on ${r.date}: ${(gap * 100).toFixed(4)}%`;
+  if (Math.abs(gap) > MAX_CROSS_GAP) await recordHealth("cross-rate", 0, `${note} (limit ${MAX_CROSS_GAP * 100}%)`);
+  else await recordHealth("cross-rate", 1, undefined, note);
+  log.push(`cross-rate: ${note}`);
 }
 
 /** Insert a prediction_errors row for every prediction whose actual (official Wise) rate exists. */
@@ -408,7 +449,11 @@ function restrict(map: Map<string, number>, maxDate: string): Map<string, number
   return out;
 }
 
-async function insertPredictions(target: Target, rows: PredictionRow[], overwrite: boolean) {
+/**
+ * Write-once: a forecast, once stored, is never changed (ON CONFLICT DO NOTHING). A second run on the
+ * same day keeps the first run's forecast. origin says whether the row was made live or replayed.
+ */
+async function insertPredictions(target: Target, rows: PredictionRow[], origin: "live" | "replay") {
   if (!rows.length) return;
   const sql = db();
   const data = rows.map((r) => ({
@@ -420,18 +465,15 @@ async function insertPredictions(target: Target, rows: PredictionRow[], overwrit
     predicted: r.predicted,
     lower80: r.lower80,
     upper80: r.upper80,
+    origin,
+    model_version: MODEL_VERSION,
   }));
-  const cols = ["currency", "made_on", "target_date", "horizon", "model", "predicted", "lower80", "upper80"] as const;
+  const cols = [
+    "currency", "made_on", "target_date", "horizon", "model", "predicted", "lower80", "upper80", "origin", "model_version",
+  ] as const;
   for (let i = 0; i < data.length; i += 1000) {
     const chunk = sql(data.slice(i, i + 1000), ...cols);
-    if (overwrite) {
-      await sql`
-        INSERT INTO predictions ${chunk}
-        ON CONFLICT (currency, made_on, target_date, model) DO UPDATE
-          SET predicted = EXCLUDED.predicted, lower80 = EXCLUDED.lower80, upper80 = EXCLUDED.upper80, created_at = now()`;
-    } else {
-      await sql`INSERT INTO predictions ${chunk} ON CONFLICT (currency, made_on, target_date, model) DO NOTHING`;
-    }
+    await sql`INSERT INTO predictions ${chunk} ON CONFLICT (currency, made_on, target_date, model) DO NOTHING`;
   }
 }
 
@@ -497,7 +539,7 @@ async function predictCurrency(target: Target, today: string, log: string[], dea
   let partial = false;
   let buffer: PredictionRow[] = [];
   const flush = async () => {
-    await insertPredictions(target, buffer, false);
+    await insertPredictions(target, buffer, "replay");
     buffer = [];
   };
   // Oldest first: each replayed day learns from the outcomes of the days before it.
@@ -562,7 +604,7 @@ async function predictCurrency(target: Target, today: string, log: string[], dea
     pair: target,
     legMoves: legsAt?.(today, true),
   });
-  await insertPredictions(target, rows, true);
+  await insertPredictions(target, rows, "live");
   await sql`
     INSERT INTO model_stats (currency, as_of, stats) VALUES (${target}, ${today}, ${sql.json(stats as never)})
     ON CONFLICT (currency, as_of) DO UPDATE SET stats = EXCLUDED.stats`;
