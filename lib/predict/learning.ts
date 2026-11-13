@@ -82,6 +82,24 @@ const T_BEATS = 2.6;
 /** Long-horizon errors arrive weeks late (stale regime), so only correct bias up to this horizon. */
 const MAX_BIAS_BUCKET = 7;
 const MIN_Q80_SAMPLES = 30;
+/**
+ * Recency half-life (days of target age) of the errors behind the 80% band. The 2026-11-14 backtest
+ * (equal weights → 60 → 30 → 15 days): USD→LKR coverage 67.2 → 69.6 → 70.7 → 71.2%, SGD→USD 83.5 → 82.4
+ * → 81.6 → 80.1%, SGD→LKR 80.2 → 80.4 → 79.1 → 75.7%; MAE identical. 30 = smallest total distance to 80%.
+ */
+export const BAND_HALF_LIFE_DAYS = 30;
+
+/** Smallest value whose cumulative weight reaches q of the total (= the plain quantile for equal weights). */
+export function weightedQuantile(xs: { a: number; w: number }[], q: number): number {
+  const s = [...xs].sort((x, y) => x.a - y.a);
+  const total = s.reduce((t, x) => t + x.w, 0);
+  let c = 0;
+  for (const x of s) {
+    c += x.w;
+    if (c >= q * total - 1e-12) return x.a;
+  }
+  return s[s.length - 1].a;
+}
 
 /** Mean horizon of each bucket (1, 2.5, 5.5, 11, 23 for the default buckets). */
 export const BUCKET_MEAN_H: Record<number, number> = Object.fromEntries(
@@ -266,22 +284,19 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
     const ensDays = index.days(bucket, "ensemble");
     let ensN = 0;
     let ensSq = 0;
-    const abs: number[] = [];
+    const abs: { a: number; w: number }[] = [];
     if (ensDays) {
       for (const w of window) {
         const d = ensDays.get(w.date);
         if (!d) continue;
         ensN += d.n;
         ensSq += d.sumSq;
-        if (d.absNorm) for (const a of d.absNorm) abs.push(a);
+        const wt = 0.5 ** (w.age / BAND_HALF_LIFE_DAYS);
+        if (d.absNorm) for (const a of d.absNorm) abs.push({ a, w: wt });
       }
     }
     const sigma = ensN >= 10 ? Math.sqrt(ensSq / ensN) : null;
-    let q80: number | null = null;
-    if (abs.length >= MIN_Q80_SAMPLES) {
-      abs.sort((a, b) => a - b);
-      q80 = abs[Math.min(abs.length - 1, Math.ceil(0.8 * abs.length) - 1)];
-    }
+    const q80 = abs.length >= MIN_Q80_SAMPLES ? weightedQuantile(abs, 0.8) : null;
 
     return {
       bucket,

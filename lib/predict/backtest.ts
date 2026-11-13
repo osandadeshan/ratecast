@@ -7,6 +7,7 @@
 import { HORIZON_BUCKETS, MAX_HORIZON, bucketOf } from "../config";
 import { addDays } from "../dates";
 import { detectNonTradingDow, dowOf } from "./calendar";
+import type { PredictionRow } from "./engine";
 import { ErrorIndex } from "./learning";
 import { type PairInputs, combineLegMoves, feedOutcomes, forecastDay, restrict } from "./replay";
 
@@ -53,6 +54,8 @@ export function runBacktest(
   legsOf: Partial<Record<string, readonly string[]>>,
   today: string,
   deadline = Infinity,
+  /** Called for every scored final forecast (for ad-hoc analysis, e.g. coverage in event windows). */
+  onScored?: (pair: string, row: PredictionRow, actual: number) => void,
 ): BacktestResult {
   const from = addDays(today, -BACKTEST_DAYS);
   const to = addDays(today, -1);
@@ -92,6 +95,7 @@ export function runBacktest(
         const actual = inp.official.get(r.targetDate);
         const nv = naiveAt.get(r.horizon);
         if (!actual || !nv) continue;
+        onScored?.(inp.pair, r, actual);
         const a = acc.get(bucketOf(r.horizon))!;
         a.n++;
         a.abs += Math.abs(Math.log(r.predicted / actual));

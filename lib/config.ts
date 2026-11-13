@@ -20,7 +20,7 @@ export const CROSS_LEGS: Partial<Record<Target, readonly [Target, Target]>> = { 
  * lib/predict, the learning rules or the inputs change, so accuracy can be compared per version.
  * The git commit is appended on Vercel.
  */
-export const MODEL_VERSION_BASE = "2026.11.13";
+export const MODEL_VERSION_BASE = "2026.11.14";
 export const MODEL_VERSION =
   MODEL_VERSION_BASE + (process.env.VERCEL_GIT_COMMIT_SHA ? `+${process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7)}` : "");
 
@@ -80,6 +80,11 @@ export const USER_AGENT =
 export const MACRO_FACTORS = [
   { series: "ust2y", label: "US 2-year yield", lagDays: 1, transform: "diff" },
   { series: "brent", label: "Brent crude oil", lagDays: 9, transform: "log" },
+  // Fed H.10 broad dollar index: weekly release Monday 16:15 ET (Tue ~05:15 SGT, FRED a few hours later) with
+  // data to the previous Friday. A Monday value is public after 8 days, 9 if the Monday is a US holiday; 10
+  // leaves room for FRED posting after the 09:30 SGT sync. SGD→USD only (planned that way: it is the USD side
+  // of that pair; the LKR pairs move on CBSL policy instead).
+  { series: "usd_broad", label: "Broad US dollar index", lagDays: 10, transform: "log", pairs: ["USD"] },
 ] as const;
 export type MacroSeries = (typeof MACRO_FACTORS)[number]["series"];
 /** The macro model reacts to each factor's move over this many days (ending at its lagged date). */
@@ -118,4 +123,5 @@ export const SRI_LANKA_META = [
   { series: "lk_tbill3m", label: "Sri Lanka 3-month T-bill yield", transform: "diff" },
   { series: "lk_remit", label: "Workers' remittances (USD mn / month)", transform: "log" },
   { series: "lk_tourism", label: "Tourism earnings (USD mn / month)", transform: "log" },
+  { series: "lk_ccpi_yoy", label: "Colombo CPI inflation (YoY %)", transform: "diff" },
 ] as const;

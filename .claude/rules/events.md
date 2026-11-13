@@ -7,15 +7,22 @@ paths:
   - "lib/sync.ts"
 ---
 
-# Policy events rules (FOMC, CBSL, IMF)
+# Policy events rules (FOMC, CBSL, IMF, US CPI / jobs)
 
 - **Fully automatic. The owner never enters dates by hand.** Don't add hand-maintained calendars, date
   constants or "remind the owner" flows. If a source has no clean feed, scrape or parse it, infer the date, or
   record it after the fact. Show breakage through `source_health`.
 - **Events only widen the 80% band. They never move the point forecast.** Nobody knows the decision in
   advance, so a direction would be fake precision.
-- `events.kind` is data, like model names: `fomc`, `cbsl_policy`, `imf`. Never rename one. Add new kinds to
-  `EVENT_KINDS` in `lib/predict/events.ts`.
+- `events.kind` is data, like model names: `fomc`, `cbsl_policy`, `imf`, `us_cpi`, `us_jobs`. Never rename one.
+  Add new kinds to `EVENT_KINDS` in `lib/predict/events.ts`.
+- Each kind has `widens`. Only `widens: true` kinds (`fomc`, `cbsl_policy`, `imf`) add band variance or are
+  excluded from the ordinary-day baseline. `us_cpi` / `us_jobs` are `widens: false`: stored, shown on the chart
+  and card, their ratio is learned and displayed, but the band is exactly what it is without them. Reason
+  (2026-11-14 backtest, fixed date 2026-11-13): MAE identical, and with widening SGD→USD coverage on CPI
+  windows rose from 80–85% to 87–100% and on jobs windows from 78–86% to 81–88%, i.e. those days were already
+  covered. Turn widening on for a kind only if a backtest shows its windows under-covered.
+- `OUTCOME_KINDS` (`fomc`, `cbsl_policy`, `imf`): only these get a decision outcome. Data releases have none.
 
 ## Source contract (`lib/sources/events.ts`)
 - Each fetcher returns `SourceResult { source, events, error?, note? }`. It never throws out of `fetchAllEvents()`.
@@ -32,6 +39,7 @@ paths:
 | `fed-page` | federalreserve.gov/monetarypolicy/fomccalendars.htm | HTML → text tokens. Heading `YYYY FOMC Meetings`, then a month token (`June`, `Apr/May`) followed by days (`16-17*`). Decision = last day. Cross-month `Apr/May 30-1` → 2nd month. Skips `(notation vote)`/`(cancelled)`. `(unscheduled)` is kept. | Layout change gives 0 rows → error. Covers ~5 past years + next year. |
 | `fed-json` | federalreserve.gov/json/calendar.json | `type: "FOMC"` + title `FOMC Meeting` (case varies), `month` + last number of `days`. | Fallback/redundancy. Covers 2017 → end of the current year only. |
 | `cbsl-mpr` | cbsl.gov.lk/en/press/press-releases/monetary-policy-review | Past review dates from PDF file names `press_YYYYMMDD_Monetary_Policy_Review_No_N_YYYY_*.pdf`. Next date from the **latest PDF** via `pdfText()`: `next regular statement … will be on D Month YYYY`, matched on whitespace-free text (`compact()`). | The year's last statement (Nov/Dec) names no next date → `note`, not error. Missing next date in other months → error. PDF text uses odd spacing, so always match compacted text. |
+| `bls` | bls.gov/schedule/YYYY/home.htm (years y−2 … y+1) | `<tr>` rows: `date-cell` "Weekday, Month D, YYYY" + `desc-cell` `<strong>` release name. Exact names only: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (not "… Average Price", "State Employment …"). | A missing current year or 0 rows → error. A missing future year → note "schedule not published yet". |
 | `cbsl-rss` | cbsl.gov.lk/en/rss.xml | Items whose title matches the IMF regex (`IMF`, `International Monetary Fund`, `EFF`, `staff-level agreement`), dated in `Asia/Colombo`. | Only ~10 latest items, so it only collects going forward (daily polling is enough). |
 
 - `lib/sources/pdf.ts` is a dependency-free extractor (inflates FlateDecode streams, reads `Tj`/`TJ` literal
@@ -47,6 +55,9 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
 - CBSL past review: the previous review's date if it was ≤ 120 days earlier (each statement announces the
   next), else `event − 56 d`. Scheduled next date: the latest statement's date.
 - IMF (RSS): the event day (recorded after the fact).
+- BLS (`blsKnownSince`): Dec 1 of the previous year if the day is in the usual range (CPI days 10–15, jobs days
+  1–10: BLS publishes the next year's schedule in the autumn), else `date − 7` (a rescheduled release, e.g.
+  after the Oct–Nov 2025 shutdown).
 - The upsert keeps `LEAST(old, new)`, so `known_since` can only move earlier.
 - Known approximation: the first review of a year really becomes public with CBSL's yearly schedule (Dec/Jan),
   but it gets the November review's date. The effect is small: that's > 31 days out until late December.
@@ -54,7 +65,7 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
 ## Math (`lib/predict/events.ts`, pure)
 - Move around an announcement on day E: `ln(r(E+1) / r(E−1))` (2-day window, robust to Wise's UTC-midnight timing).
 - Baseline: the same 2-day move around every **ordinary weekday** in the last 730 days, excluding ±2 days
-  around any event. `base2` = its mean square (needs ≥ 60 days).
+  around any **band-widening** event (so `widens: false` kinds change nothing). `base2` = its mean square (needs ≥ 60 days).
 - Per kind: `ratio = (Σ move² + 6·base2) / (n + 6) / base2`, floored at 1, with a minimum of 4 events
   (otherwise ratio = 1). It only uses events with `E + 1 <= asOf`.
 - Band: `sigma = sqrt(sigma_learned² + Σ (ratio − 1)·base2)`, adding one term per known event with

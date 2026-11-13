@@ -17,12 +17,21 @@ export interface EventRecord {
   outcome?: string | null;
 }
 
+/**
+ * widens: whether the kind's learned extra variance is added to the band. `us_cpi` / `us_jobs` were
+ * backtested on 2026-11-13: SGD→USD CPI windows went from 82–85% to 87–90% coverage (already above 80%,
+ * because the learned band already contains those days), so they are shown but do not widen the band.
+ */
 export const EVENT_KINDS = {
-  fomc: { label: "US Fed rate decision (FOMC)", short: "Fed" },
-  cbsl_policy: { label: "CBSL monetary policy review", short: "CBSL" },
-  imf: { label: "IMF / Sri Lanka programme news", short: "IMF" },
+  fomc: { label: "US Fed rate decision (FOMC)", short: "Fed", widens: true },
+  cbsl_policy: { label: "CBSL monetary policy review", short: "CBSL", widens: true },
+  imf: { label: "IMF / Sri Lanka programme news", short: "IMF", widens: true },
+  us_cpi: { label: "US inflation (CPI) release", short: "CPI", widens: false },
+  us_jobs: { label: "US jobs report", short: "Jobs", widens: false },
 } as const;
 export type EventKind = keyof typeof EVENT_KINDS;
+/** Kinds whose statement says what was decided (`events.outcome`). The others are data releases. */
+export const OUTCOME_KINDS: readonly string[] = ["fomc", "cbsl_policy", "imf"];
 
 export interface EventVolStat {
   kind: string;
@@ -57,7 +66,9 @@ function move(rates: Map<string, number>, e: string): number | undefined {
 export function learnEventVol(rates: Map<string, number>, events: EventRecord[], asOf: string): EventVolStat[] {
   const from = addDays(asOf, -LOOKBACK_DAYS);
   const past = events.filter((e) => e.eventDate > addDays(from, 1) && addDays(e.eventDate, 1) <= asOf);
-  const near = new Set(past.flatMap((e) => [-2, -1, 0, 1, 2].map((k) => addDays(e.eventDate, k))));
+  // Ordinary days exclude ±2 days around band-widening kinds only, so display-only kinds change nothing.
+  const widening = past.filter((e) => (EVENT_KINDS as Record<string, { widens: boolean }>)[e.kind]?.widens);
+  const near = new Set(widening.flatMap((e) => [-2, -1, 0, 1, 2].map((k) => addDays(e.eventDate, k))));
 
   // Baseline: the same 2-day move around every ordinary weekday.
   let sum = 0;
@@ -93,6 +104,7 @@ export function eventExtraVar(events: EventRecord[], stats: EventVolStat[], anch
     const key = `${e.kind}:${e.eventDate}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (!(EVENT_KINDS as Record<string, { widens: boolean }>)[e.kind]?.widens) continue;
     const s = stats.find((x) => x.kind === e.kind);
     if (s) extra += (s.ratio - 1) * s.base2;
   }

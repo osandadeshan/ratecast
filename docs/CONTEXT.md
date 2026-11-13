@@ -216,6 +216,60 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
   4–7d 0.3801 → 0.3844 (worse), others unchanged. Neither was kept. Flat days stay in scoring because a holiday
   forecast that stays flat is genuinely right; the random walk gets the same credit on the same dates.
 
+**2026-11-14 · Phase 4: more sources and candidates (`2026.11.14`).** All runs: in-memory backtest at fixed date
+2026-11-13 (365 days replayed, targets in the last 300 days scored, Sundays excluded). MAE % of the final forecast.
+
+- **BLS US CPI and jobs-report days** (`us_cpi`, `us_jobs`, 94 dates 2024–2027 from the BLS schedule pages).
+  With band widening on: MAE identical; SGD→USD 80% coverage on CPI windows rose from 80–85% to 87–100% and on
+  jobs windows from 78–86% to 81–88%. Those days were already covered, so widening would only make ranges wider
+  than needed. **Kept as display-only events** (`widens: false`): stored, on the chart and card, ratio learned
+  and shown (SGD→USD CPI ≈ 1.41, jobs 1.00), band unchanged. The baseline's "near an event" exclusion now only
+  counts widening kinds, so with them the backtest is identical to the digit to the run without them.
+- **Fed broad dollar index** (FRED `DTWEXBGS`, weekly H.10 release, lag 10 days, SGD→USD only) as a third
+  `macro` input. `macro` for SGD→USD before → after: 1d 0.1639 → 0.1640, 2–3d 0.2375 → 0.2375, 4–7d 0.3413 →
+  0.3403, 8–14d 0.4581 → 0.4569, 15–31d 0.6538 → 0.6534 (random walk 0.1637 / 0.2343 / 0.3360 / 0.4570 /
+  0.6511). A hair better than before, still behind the random walk, so `macro` stays at weight 0. Applied to all
+  pairs first, it made `macro` worse for both LKR pairs, so it's scoped to SGD→USD (decided before the scoped run).
+- **`arima` candidate** (ARIMA(p,1,0), p = 0–5 by BIC, ridge-shrunk, stationary fits only, gated like every
+  model). MAE vs random walk: SGD→USD identical (BIC picks p = 0 = random walk); USD→LKR worse everywhere
+  (0.1829 / 0.2522 / 0.4113 / 0.5783 / 0.9668 vs 0.1783 / 0.2487 / 0.3801 / 0.5473 / 0.9453); SGD→LKR worse at
+  1–7 days, better at 8–14 (0.6253 vs 0.6357, −1.6%) and 15–31 (0.9302 vs 0.9429, −1.3%). Not significant, so
+  weight 0; the gate will promote it if that holds. Without the stationarity guard USD→LKR 15–31d was 2.57%.
+- **80% band, recency-weighted errors** (half-life on target age): MAE identical. Coverage, all horizons:
+
+  | half-life | SGD→USD | USD→LKR | SGD→LKR |
+  |---|---|---|---|
+  | none (before) | 83.5% | 67.2% | 80.2% |
+  | 60 days | 82.4% | 69.6% | 80.4% |
+  | **30 days (adopted)** | **81.6%** | **70.7%** | **79.1%** |
+  | 15 days | 80.1% | 71.2% | 75.7% |
+
+  30 days is the smallest total distance to 80%. USD→LKR is still under-covered (1–7d 78%, 8–14d 74.5%,
+  15–31d 66%) because its errors come in regimes: monthly coverage ran 98–99% in Jan–Feb 2026, 7–43% in Mar–Jun
+  2026 (range too narrow after the flat-Monday period), then 99–100% in Oct–Nov. A faster window over-reacts on
+  SGD→LKR, so this is where the trade-off sits. Stored backtest of `2026.11.14`: skill USD 1.0000 / USDLKR
+  1.0000 / LKR 0.9934; "same" as `2026.11.13` for all three.
+- **Colombo CPI** (CBSL `CCPI_and_CCPI_CORE_*.xlsx`, headline YoY): ingested as `lk_ccpi_yoy`, shown in Market
+  context. The sheet only holds the last 13 months, so it can't be backtested as an input yet. History builds up
+  in `market_data` run by run; test it as a `lanka` input after ~2 years.
+- **MAS**: still a maintenance page on 2026-11-13. Deferred again.
+- **Offline Prophet / XGBoost test (run once, never deployed).** Throwaway Python venv, walk-forward from every
+  3rd anchor in the same window (86 scored anchors per pair), training only on data up to the anchor. Prophet:
+  730 days of log rates, weekly seasonality. XGBoost: 10 lagged daily returns + 20-day volatility, one regressor
+  per horizon, trained only on targets already known. MAE % (1 / 3 / 7 / 14 / 31 days):
+
+  | pair | random walk | Prophet | XGBoost |
+  |---|---|---|---|
+  | SGD→USD | 0.188 / 0.267 / 0.373 / 0.500 / 0.788 | 0.510 / 0.608 / 0.593 / 0.731 / 1.056 | 0.194 / 0.280 / 0.397 / 0.549 / 0.840 |
+  | USD→LKR | 0.171 / 0.274 / 0.465 / 0.574 / 1.281 | 1.114 / 1.131 / 1.347 / 1.562 / 2.410 | 0.219 / 0.312 / 0.564 / 0.665 / 1.377 |
+  | SGD→LKR | 0.303 / 0.390 / 0.577 / 0.694 / 1.179 | 0.975 / 0.992 / 1.167 / 1.306 / 1.922 | 0.314 / 0.412 / 0.563 / 0.658 / 1.194 |
+
+  **Not recommended.** Prophet is 2–6× worse at every horizon (its trend extrapolation and changepoints chase
+  noise in a near-random walk). XGBoost loses to the random walk in 13 of 15 cells; its two wins (SGD→LKR 7d
+  −2.4%, 14d −5.2%) are the horizons where `cbsl_gap` and `arima` already show a similar small edge, on 86
+  overlapping anchors, nowhere near significant. Both would also need a Python runtime or a model artifact
+  on Vercel, which the free tier and the "one code path" rule argue against.
+
 ## Known limitations / risks
 - **Wise may block Vercel IPs** (untested at the time of writing). The live quote and sync would fail; check
   with the `verify-deploy` skill.
@@ -254,7 +308,8 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - **No model beats the random walk yet** (2026-11-13). The forecast equals "no change" in every bucket. That
   is the honest floor; candidates (`cbsl_gap`, `mean_reversion`, `macro`) are promoted automatically if
   they become significantly better.
-- **USD→LKR 1-day band covers 78%** (target 80%; 2–31 days are 81–82%). Watch it.
+- **USD→LKR 80% band under-covers** (2026-11-14 backtest: 78% at 1–7 days, 74.5% at 8–14, 66% at 15–31) because
+  its errors come in regimes. The 30-day recency weighting helped (67.2% → 70.7% overall). Watch it.
 - **CBSL reserves / net USD purchases aren't ingested.** They're only in a weekly PDF the dependency-free
   PDF reader can't extract text from.
 - **CBSL monthly tables are published 1–2 months late**, so policy-rate, T-bill, remittance and tourism
@@ -267,7 +322,8 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - Fallback live rate from cross-check sources when Wise fails.
 - A USD/LKR-specific signal (CBSL publishes rates, but no free stable API was found). CBSL's Weekly Economic
   Indicators PDF (reserves, net USD purchases) can now be parsed with `lib/sources/pdf.ts`.
-- Phase 4 of the policy-events plan ("what moved the forecast today"). Polymarket/Kalshi Fed odds if `macro`
+- "What moved the forecast today" (from the policy-events plan).
+- Colombo CPI as a `lanka` input once ~2 years of `lk_ccpi_yoy` are stored. Polymarket/Kalshi Fed odds if `macro`
   ever gets promoted. Headline sentiment (GDELT) if it becomes reachable and a longer history is available.
 - Weekday-aware evaluation that skips weekend duplicates.
 - Email/notification when tomorrow's forecast moves > x% (would need a free mail provider).

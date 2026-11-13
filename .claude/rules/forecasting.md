@@ -17,7 +17,8 @@ paths:
     **and** bucket ≤ 7 days. Long-horizon bias correction was measured to double the error (stale regime
     signal). Don't remove this gate.
   - 80% band: half-width = `q80 × √(h / meanH)`, where `q80` is the empirical 80th percentile of the bucket's
-    horizon-normalised |ensemble log error| (n ≥ 30). Fallback: RMS of errors, else daily vol × √h. (The old
+    horizon-normalised |ensemble log error| (n ≥ 30), recency-weighted with half-life `BAND_HALF_LIFE_DAYS` = 30
+    (2026-11-14: USD→LKR coverage 67.2 → 70.7%, SGD→USD 83.5 → 81.6%, SGD→LKR 80.2 → 79.1%; 15 days over-reacted). Fallback: RMS of errors, else daily vol × √h. (The old
     RMS band covered 92–94% at 2–14 days and was one width for a whole bucket.)
   - Non-trading weekdays (`calendar.ts`, detected: Sunday's Wise point repeats Saturday's ~98% of the time):
     forecasts don't move across them and their target dates are excluded from learning and accuracy.
@@ -40,7 +41,8 @@ paths:
 - `macro` model (shadow): ridge regression (λ = n, no intercept, features scaled by RMS) of the daily pair return
   on each factor's move over `MACRO_WINDOW_DAYS` = 5 days, ending at `d − 1 − lagDays`. Future factor moves
   count as 0, so its forecast stops moving ~a week out. Factors and lags are in `MACRO_FACTORS` (`lib/config.ts`):
-  `ust2y` (diff, lag 1 day) and `brent` (log, lag 9 days). See `macro.md`.
+  `ust2y` (diff, lag 1 day), `brent` (log, lag 9 days) and `usd_broad` (log, lag 10, SGD→USD only via `pairs`).
+  See `macro.md`.
 - `news` model (shadow): `naive` plus the learned post-announcement drift (`news.ts`). For the 5 days after
   E+1 of a classified decision, it adds that category's shrunk mean drift (shrink 8 pseudo-events at 0,
   ≥ 3 events, 730-day lookback). It only uses outcomes from E+1 on. On all other days it **equals `naive`**
@@ -57,6 +59,9 @@ paths:
   known (≥ 120 obs), shrunk toward 0 (`GAP_SHRINK` 60), β clamped to [−1, 1.5]. Forecast = today + β·gap.
   2026-11-13 replay: SGD→LKR 8–14d 0.613 vs naive 0.627 (−2.3%), out-of-sample 7d −5.7%; USD→LKR worse.
   Not yet significant, so weight 0. Tests: `tests/predict-cbsl-gap.test.ts` (incl. a no-look-ahead check).
+- `arima` model (gated, no external data so not in `SHADOW_MODELS`): ARIMA(p,1,0) on 250 days of returns, p = 0–5
+  by BIC, ridge λ = 0.1·mean diag, only fits with Σ|β| < 0.9 (an unguarded fit blew up USD→LKR 15–31d to 2.6%).
+  2026-11-14: equals naive on SGD→USD, worse on USD→LKR, SGD→LKR 8–31d −1.3 to −1.6% (not significant).
 - Learning window 180 days, replay 365 days (`BACKFILL_DAYS`). The replay is time-boxed
   (`REPLAY_BUDGET_MS`, 40 s) and resumes on the next run. Locally set `REPLAY_BUDGET_MS=100000000` for a full run.
 - **No look-ahead** in anything you add: inputs restricted to `<= anchorDate` (basket `< anchorDate` in replay).

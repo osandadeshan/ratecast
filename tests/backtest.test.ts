@@ -89,3 +89,10 @@ test("factorsAt applies each factor's publication lag", () => {
   // brent lag is 9 days: on 2026-11-13 only data up to 2026-11-04 was public.
   assert.deepEqual([...factorsAt({ brent }, TODAY).brent.keys()], ["2026-11-01"]);
 });
+
+test("weightedQuantile equals the plain quantile for equal weights and follows heavy weights", async () => {
+  const { weightedQuantile } = await import("@/lib/predict/learning");
+  const xs = [5, 1, 4, 2, 3].map((a) => ({ a, w: 1 }));
+  assert.equal(weightedQuantile(xs, 0.8), 4);
+  assert.equal(weightedQuantile([{ a: 1, w: 1 }, { a: 10, w: 9 }], 0.5), 10);
+});

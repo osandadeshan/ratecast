@@ -16,12 +16,12 @@ import {
 import { addDays, todayISO } from "./dates";
 import { db, ensureSchema } from "./db";
 import { type PredictionRow } from "./predict/engine";
-import { type EventRecord } from "./predict/events";
+import { OUTCOME_KINDS, type EventRecord } from "./predict/events";
 import { ErrorIndex, type ErrorRecord, type LearnedStats } from "./predict/learning";
 import { compareVersions, runBacktest, type BacktestResult } from "./predict/backtest";
 import { type PairInputs, combineLegMoves, feedOutcomes, forecastDay, learningChanges, restrict } from "./predict/replay";
 import { fetchAllEvents, fetchOutcomes } from "./sources/events";
-import { fetchBrent, fetchTreasury2y } from "./sources/macro";
+import { fetchBrent, fetchTreasury2y, fetchUsdBroad } from "./sources/macro";
 import { fetchCrossChecks, fetchUsdBasket } from "./sources/market";
 import { SRI_LANKA_SERIES } from "./sources/srilanka";
 import { MAX_CROSS_GAP, crossGap, validateHistory, validateLive } from "./sources/validate";
@@ -153,7 +153,7 @@ async function ingestEvents(log: string[]): Promise<Set<string>> {
   const sql = db();
   let results;
   try {
-    results = await fetchAllEvents();
+    results = await fetchAllEvents(todayISO());
   } catch (e) {
     log.push(`events failed: ${(e as Error).message}`);
     return new Set();
@@ -222,6 +222,11 @@ async function ingestMacro(today: string, log: string[]) {
       series: "brent",
       run: async () => fetchBrent(addDays(today, (await count("brent")) < 300 ? -800 : -60)),
     },
+    {
+      source: "fred-usd-broad",
+      series: "usd_broad",
+      run: async () => fetchUsdBroad(addDays(today, (await count("usd_broad")) < 300 ? -800 : -60)),
+    },
   ];
   // Sri Lanka (CBSL): daily official rates, monthly policy/T-bill rates, remittances, tourism.
   for (const s of SRI_LANKA_SERIES) {
@@ -271,7 +276,8 @@ async function loadFactors(): Promise<Record<string, Map<string, number>>> {
 async function classifyOutcomes(today: string, log: string[], okSources: Set<string>) {
   const sql = db();
   const pending = (await loadEvents()).filter(
-    (e) => !e.outcome && e.eventDate < today && e.eventDate >= addDays(today, -800),
+    // Only decisions have an outcome; data releases (us_cpi, us_jobs) are band-only.
+    (e) => OUTCOME_KINDS.includes(e.kind) && !e.outcome && e.eventDate < today && e.eventDate >= addDays(today, -800),
   );
   if (!pending.length) {
     await recordHealth("outcomes", 0); // nothing to do is healthy, not stale

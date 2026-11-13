@@ -31,7 +31,7 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
-| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 80 tests) |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 86 tests) |
 | Backtest current code (read-only) | `npm run backtest` (~30 s; same code path as the sync) |
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
@@ -50,14 +50,14 @@ lib/config.ts                 Currencies, horizons, windows, timezone, MACRO_FAC
 lib/dates.ts                  YYYY-MM-DD string date math (UTC-based)
 lib/db.ts                     postgres.js client + idempotent CREATE TABLE IF NOT EXISTS schema
 lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks),
-                              macro (US Treasury 2y yield CSV, FRED Brent CSV),
+                              macro (US Treasury 2y yield CSV, FRED Brent + broad dollar index CSV),
                               srilanka (+ srilanka-xlsx: CBSL daily USD/LKR + SGD/LKR fixing, policy rate,
-                              3m T-bill, remittances, tourism; dependency-free .xlsx reader),
-                              events (Fed FOMC page + JSON, CBSL review list + PDF, CBSL RSS,
+                              3m T-bill, remittances, tourism, Colombo CPI; dependency-free .xlsx reader),
+                              events (Fed FOMC page + JSON, CBSL review list + PDF, CBSL RSS, BLS schedule,
                               decision outcomes read from each FOMC statement / CBSL review PDF),
                               pdf (dependency-free PDF text via node:zlib), http (getJSON/getText/getBytes)
 lib/predict/                  series helpers, calendar (detects non-trading weekdays, e.g. Sundays),
-                              models (incl. `macro`, `lanka`, `cross`, `cbsl_gap` + SHADOW_MODELS), learning (weights/bias/
+                              models (incl. `macro`, `lanka`, `cross`, `cbsl_gap`, `arima` + SHADOW_MODELS), learning (weights/bias/
                               sigma/shadow promotion), events (event-day
                               volatility + band widening), news (post-announcement drift for the
                               shadow `news` model), engine (forecast)
@@ -91,7 +91,7 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
    (`wise-history:*`, `wise-live:*`). `cross-rate` checks SGD→LKR ≈ SGD→USD × USD→LKR (limit 0.5%).
    The page shows delta as **predicted − actual** (+ = too high). The stored `prediction_errors.delta` is
    actual − predicted and stays that way (stored data).
-3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross, cbsl_gap`
+3. **Model names are data.** Stored model names: `naive, drift, holt, monthly_pattern, mean_reversion, market, macro, news, lanka, cross, cbsl_gap, arima`
    plus the derived `blend` (raw weighted), `blend_bc` (blend with bias correction, always stored as the
    counterfactual) and `ensemble` (the final number shown to users). Renaming a model orphans its history.
 4. **Schema changes are additive.** `ensureSchema()` runs `CREATE ... IF NOT EXISTS` on every cold start. There
@@ -101,7 +101,8 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
 6. **Policy events are automatic, band-only and look-ahead-free.** (`lib/sources/events.ts`, `lib/predict/events.ts`)
    - Every event comes from a scraper. The owner will **never** enter dates or data by hand, so don't design
      anything that needs it. If a source has no clean feed, parse HTML/PDF, infer, or record after the fact.
-   - `events.kind` values (`fomc`, `cbsl_policy`, `imf`) are data, like model names: never rename.
+   - `events.kind` values (`fomc`, `cbsl_policy`, `imf`, `us_cpi`, `us_jobs`) are data, like model names: never
+     rename. `us_cpi` / `us_jobs` (BLS schedule) are `widens: false`: shown only, they don't touch the band.
    - A forecast made on day `t` uses only events with `known_since <= t`. `learnEventVol` only learns from
      events whose move window has closed (`event_date + 1 <= t`).
    - Events widen only the `ensemble` 80% band. They never change any point forecast.
@@ -142,7 +143,9 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
   run. Not built yet: MAS statements (site still shows a maintenance page), IMF forward windows, GDELT news
   tone (rate-limited from here, and the DOC API only keeps a rolling 3 months, so no backfill). See
   `docs/CONTEXT.md`.
-- Macro factors (Treasury yield curve CSV, FRED Brent CSV) are keyless and use the same cron. Polymarket/Kalshi
+- Prophet and XGBoost were tested offline once (2026-11-14) and lost to the random walk almost everywhere
+  (Prophet 2–6× worse). Not recommended, and a Python runtime doesn't fit the one-code-path rule. Don't add them.
+- Macro factors (Treasury yield curve CSV, FRED Brent and DTWEXBGS CSV) are keyless and use the same cron. Polymarket/Kalshi
   Fed odds are deferred: per-meeting contracts would need stitching and have short histories, and the 2y yield
   (same information) earned no weight. Revisit only if `macro` gets promoted.
 - Sri Lanka data (CBSL indicative-rate form POST + statistical-table .xlsx, read by `lib/sources/srilanka-xlsx.ts`

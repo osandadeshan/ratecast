@@ -25,6 +25,7 @@ const SPOT_URL = `${CBSL}/cbsl_custom/exrates/exrates_results_spot_mid.php`;
 const INDICATIVE_URL = `${CBSL}/cbsl_custom/exrates/exrates_results.php`;
 const MONETARY_PAGE = `${CBSL}/en/statistics/statistical-tables/monetary-sector`;
 const EXTERNAL_PAGE = `${CBSL}/en/statistics/statistical-tables/external-sector`;
+const PRICES_PAGE = `${CBSL}/en/statistics/statistical-tables/real-sector/prices-wages-employment`;
 
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const monthIndex = (s: string | undefined) => MONTHS.indexOf((s ?? "").trim().toLowerCase());
@@ -164,6 +165,37 @@ export const fetchCbslRemittances = (start: string) =>
 export const fetchCbslTourism = (start: string) => fetchMonthly("table2.14.1", /Earnings from Tourism/i, start, "tourism earnings");
 
 /**
+ * "Movements of the Colombo Consumer Price Index (CCPI)": rows "2026 October" in column B; the
+ * year-on-year % change of the headline CCPI is the column whose header row says "Year-on-Year"
+ * (G on 2026-11-14). Month-end points. The sheet keeps only the last ~13 months, so history builds up
+ * in market_data run by run.
+ */
+export function parseCcpiYoy(rows: SheetRow[]): Point[] {
+  const head = rows.find((r) => Object.values(r).some((v) => /Year-on-Year/i.test(v)));
+  const col = head && Object.entries(head).find(([, v]) => /Year-on-Year/i.test(v))?.[0];
+  if (!col) return [];
+  const out: Point[] = [];
+  for (const r of rows) {
+    const m = (r.B ?? "").trim().match(/^(\d{4})\s+([A-Za-z]+)$/);
+    const mi = m ? monthIndex(m[2]) : -1;
+    const v = Number(r[col]);
+    if (m && mi >= 0 && r[col] !== undefined && r[col] !== "" && Number.isFinite(v)) out.push({ date: monthEnd(Number(m[1]), mi), value: Math.round(v * 100) / 100 });
+  }
+  const uniq = new Map(out.map((p) => [p.date, p]));
+  return [...uniq.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export async function fetchCbslCcpiYoy(start: string): Promise<Point[]> {
+  const rows = await fetchSheet(PRICES_PAGE, "CCPI_and_CCPI_CORE");
+  if (!/Colombo Consumer Price Index/i.test(rows.slice(0, 3).map((r) => Object.values(r).join(" ")).join(" "))) {
+    throw new Error("CBSL CCPI: sheet is no longer the Colombo CPI (layout changed)");
+  }
+  const out = parseCcpiYoy(rows).filter((p) => p.date >= start);
+  if (!out.length) throw new Error("CBSL CCPI: no year-on-year values");
+  return out;
+}
+
+/**
  * Everything the integrator needs to wire these into market_data / MACRO_FACTORS.
  * - series: market_data name (data: never rename once stored).
  * - lagDays: days after a point's date before the 09:30 SGT sync can rely on having it
@@ -234,6 +266,18 @@ export const SRI_LANKA_SERIES = [
     maxStaleDays: 80,
     source: "cbsl-external",
     fetch: fetchCbslTourism,
+  },
+  {
+    // Context only (not in LANKA_FACTORS): the sheet holds ~13 months, too short to learn from yet.
+    // DCS publishes on the month's last working day (Oct 2026 on 2026-10-30), so 5 days is conservative.
+    series: "lk_ccpi_yoy",
+    label: labelOf("lk_ccpi_yoy"),
+    lagDays: 5,
+    transform: "diff",
+    frequency: "monthly",
+    maxStaleDays: 45,
+    source: "cbsl-prices",
+    fetch: fetchCbslCcpiYoy,
   },
 ] as const;
 

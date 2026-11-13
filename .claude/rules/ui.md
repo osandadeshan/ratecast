@@ -31,3 +31,7 @@ paths:
   predicted − actual ("too high" / "too low").
 - `VersionsCard` (before Data sources) reads `data.versions` (latest version's backtest per pair + comparison) and
   `data.learningLog`. Skill < 1 = better than the random walk; always show the random walk's error beside it.
+- Policy events card: kinds with `widens: false` in `EVENT_KINDS` (US CPI, jobs report) say "shown only" and
+  never "range widened". `lib/predict/events.ts` is pure, so the client component may import `EVENT_KINDS`.
+- Market context formats: `FORMAT` in `lib/dashboard.ts` (`pct` default, `usd`, `lkr`, `usdmn`, `index` for the
+  broad dollar index).

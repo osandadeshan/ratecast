@@ -64,6 +64,13 @@ export function parseFredCsv(csv: string): Point[] {
   return out;
 }
 
+/** Fed broad trade-weighted dollar index (DTWEXBGS, H.10, weekly release of daily values). */
+export async function fetchUsdBroad(start: string): Promise<Point[]> {
+  const out = parseFredCsv(await getText(fredUrl("DTWEXBGS", start), 25_000));
+  if (!out.length) throw new Error("FRED DTWEXBGS: no values");
+  return out;
+}
+
 export async function fetchBrent(start: string): Promise<Point[]> {
   const out = parseFredCsv(await getText(fredUrl("DCOILBRENTEU", start), 25_000));
   if (!out.length) throw new Error("FRED DCOILBRENTEU: no values");

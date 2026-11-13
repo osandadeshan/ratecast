@@ -34,7 +34,7 @@ const wednesdays = (n: number) => Array.from({ length: n }, (_, i) => addDays(AS
 
 test("learnEventVol returns one stat per known kind, ratio 1 when there are no events", () => {
   const stats = learnEventVol(path(760), [], AS_OF);
-  assert.deepEqual(stats.map((s) => s.kind).sort(), ["cbsl_policy", "fomc", "imf"]);
+  assert.deepEqual(stats.map((s) => s.kind).sort(), ["cbsl_policy", "fomc", "imf", "us_cpi", "us_jobs"]);
   for (const s of stats) {
     assert.equal(s.n, 0);
     assert.equal(s.ratio, 1);
@@ -147,4 +147,11 @@ test("eventExtraVar: sums different events, counts duplicates once, ignores rati
   near(eventExtraVar(events, STATS, ANCHOR, addDays(ANCHOR, 31)), 2e-4 + 0.5e-4);
   assert.equal(eventExtraVar(events, [], ANCHOR, addDays(ANCHOR, 31)), 0);
   assert.equal(eventExtraVar([], STATS, ANCHOR, addDays(ANCHOR, 31)), 0);
+});
+
+test("display-only kinds (CPI, jobs) never widen the band", async () => {
+  const { EVENT_KINDS } = await import("@/lib/predict/events");
+  assert.equal(EVENT_KINDS.us_cpi.widens, false);
+  assert.equal(EVENT_KINDS.us_jobs.widens, false);
+  assert.equal(EVENT_KINDS.fomc.widens, true);
 });

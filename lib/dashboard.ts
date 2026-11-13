@@ -163,7 +163,7 @@ export interface Dashboard {
     /** Sri Lanka series: shown only on LKR pairs. */
     lanka: boolean;
     /** Display format of the level. */
-    format: "pct" | "usd" | "lkr" | "usdmn";
+    format: "pct" | "usd" | "lkr" | "usdmn" | "index";
   }[];
 }
 
@@ -172,12 +172,15 @@ const SOURCE_LABEL: Record<string, string> = {
   "fed-page": "Fed FOMC calendar page",
   "fed-json": "Fed calendar feed",
   "cbsl-mpr": "CBSL policy review list",
+  bls: "BLS release schedule (US CPI, jobs)",
   "cbsl-rss": "CBSL press releases (RSS)",
   treasury: "US Treasury yield curve",
   "fred-brent": "FRED Brent oil price",
+  "fred-usd-broad": "FRED broad US dollar index (Fed H.10)",
   "cbsl-fx": "CBSL official exchange rates",
   "cbsl-rates": "CBSL policy rate and T-bill yields",
   "cbsl-external": "CBSL remittances and tourism",
+  "cbsl-prices": "CBSL Colombo CPI (CCPI) table",
   "wise-history:LKR": "Wise SGD → LKR history",
   "wise-history:USD": "Wise SGD → USD history",
   "wise-history:USDLKR": "Wise USD → LKR history",
@@ -199,21 +202,22 @@ const SERIES_CATALOG: { series: string; table: "rates" | "market"; label: string
   { series: "usd_basket", table: "market", label: "ECB reference rates (USD basket)", feeds: "market model", maxAgeDays: 5 },
   { series: "ust2y", table: "market", label: "US Treasury 2-year yield", feeds: "macro model", maxAgeDays: 5 },
   { series: "brent", table: "market", label: "Brent oil (FRED)", feeds: "macro model", maxAgeDays: 14 },
+  { series: "usd_broad", table: "market", label: "Broad dollar index (FRED, Fed H.10)", feeds: "macro model", maxAgeDays: 14 },
   { series: "lk_usd_spot", table: "market", label: "CBSL USD/LKR indicative rate", feeds: "lanka, cbsl_gap", maxAgeDays: 5 },
   { series: "lk_sgd_ind", table: "market", label: "CBSL SGD/LKR indicative rate", feeds: "lanka, cbsl_gap", maxAgeDays: 5 },
   { series: "lk_opr", table: "market", label: "CBSL policy rate", feeds: "lanka", maxAgeDays: 100 },
   { series: "lk_tbill3m", table: "market", label: "Sri Lanka 3-month T-bill yield", feeds: "lanka", maxAgeDays: 100 },
   { series: "lk_remit", table: "market", label: "Sri Lanka workers' remittances", feeds: "lanka", maxAgeDays: 100 },
   { series: "lk_tourism", table: "market", label: "Sri Lanka tourism earnings", feeds: "lanka", maxAgeDays: 100 },
+  { series: "lk_ccpi_yoy", table: "market", label: "Colombo CPI inflation (CBSL)", feeds: "context only", maxAgeDays: 70 },
 ];
 
 /** Sources looked at and not used, with the reason. Shown so nothing is implied to be integrated. */
 export const NOT_INTEGRATED: { name: string; reason: string }[] = [
   { name: "MAS (Singapore) statements and data", reason: "statement links aren't in the page HTML and the data API is in maintenance; being investigated" },
   { name: "CBSL foreign reserves", reason: "only in a weekly PDF the built-in reader can't extract" },
-  { name: "Sri Lanka and Singapore inflation (CPI)", reason: "not added yet: monthly, published weeks late; candidate input under test" },
-  { name: "US inflation and jobs reports", reason: "not added yet: planned as release-day events that widen the range" },
-  { name: "US dollar index (DXY)", reason: "proprietary; the free Fed broad dollar index is a planned candidate" },
+  { name: "Singapore inflation (CPI)", reason: "published by MAS/SingStat; MAS is in maintenance. Colombo CPI is shown, but the CBSL sheet holds only 13 months, too short to test as a model input yet" },
+  { name: "US dollar index (DXY)", reason: "proprietary; the free Fed broad dollar index is used instead (SGD → USD, shadow)" },
   { name: "Financial news and sentiment", reason: "no reliable keyless feed with history to test against (GDELT times out, news RSS blocked)" },
   { name: "IMF and World Bank data", reason: "yearly figures, too slow for daily rates; IMF programme news is used as events" },
 ];
@@ -347,6 +351,7 @@ export async function getDashboard(): Promise<Dashboard> {
   const macro: Dashboard["macro"] = [];
   const FORMAT: Record<string, Dashboard["macro"][number]["format"]> = {
     brent: "usd",
+    usd_broad: "index",
     lk_usd_spot: "lkr",
     lk_sgd_ind: "lkr",
     lk_remit: "usdmn",

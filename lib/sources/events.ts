@@ -9,6 +9,7 @@ import { compact, pdfText } from "./pdf";
  * - CBSL: the Monetary Policy Review list (every past review date, from the PDF file names) and
  *   the latest review PDF, which states the date of the next one.
  * - CBSL RSS: IMF programme news, recorded after the fact.
+ * - BLS: yearly release schedules (US CPI and the jobs report), published before each year starts.
  * Each source fails independently; sync records its health in `source_health`.
  */
 
@@ -24,6 +25,20 @@ const FED_PAGE = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.ht
 const FED_JSON = "https://www.federalreserve.gov/json/calendar.json";
 const CBSL_MPR = "https://www.cbsl.gov.lk/en/press/press-releases/monetary-policy-review";
 const CBSL_RSS = "https://www.cbsl.gov.lk/en/rss.xml";
+const BLS_SCHEDULE = (year: number) => `https://www.bls.gov/schedule/${year}/home.htm`;
+/**
+ * BLS publishes the next year's release schedule in the autumn (the 2027 page existed on 2026-11-13), so a
+ * regular date counts as known from 1 December of the year before. The yearly page shows the dates that
+ * actually happened, though, including releases moved at short notice (the 2025 shutdown moved CPI to
+ * 24 Oct and the jobs report to 20 Nov and 16 Dec). A date outside the release's usual days of the month
+ * is treated as rescheduled and known only 7 days ahead, so the replay never sees it earlier than it was.
+ */
+const BLS_USUAL_DAYS = { us_cpi: [10, 15], us_jobs: [1, 10] } as const;
+function blsKnownSince(kind: keyof typeof BLS_USUAL_DAYS, date: string): string {
+  const day = Number(date.slice(8, 10));
+  const [lo, hi] = BLS_USUAL_DAYS[kind];
+  return day >= lo && day <= hi ? `${Number(date.slice(0, 4)) - 1}-12-01` : addDays(date, -7);
+}
 
 /** The FOMC publishes its schedule more than a year ahead; assume it was public 300 days before. */
 const FOMC_LEAD_DAYS = 300;
@@ -286,7 +301,51 @@ export async function fetchCbslRss(): Promise<SourceResult> {
   }
 }
 
-export async function fetchAllEvents(): Promise<SourceResult[]> {
-  const [fed, cbsl, rss] = await Promise.all([fetchFomc(), fetchCbslReviews(), fetchCbslRss()]);
-  return [...fed, cbsl, rss];
+const BLS_RELEASES: { name: string; kind: "us_cpi" | "us_jobs"; title: string }[] = [
+  { name: "Consumer Price Index", kind: "us_cpi", title: "US CPI (inflation) release" },
+  { name: "Employment Situation", kind: "us_jobs", title: "US jobs report (Employment Situation)" },
+];
+
+/**
+ * A BLS yearly schedule page: rows of `<td class="date-cell"><p>Wednesday, December 17, 2025</p></td>`
+ * … `<td class="desc-cell"><p><strong>Consumer Price Index</strong> for November 2025</p></td>`.
+ * Only the exact release names count ("Employment Situation of Veterans" is a different release).
+ */
+export function parseBlsSchedule(html: string, url: string): EventRecord[] {
+  const out: EventRecord[] = [];
+  for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const date = row[1].match(/date-cell[^>]*>\s*<p>\s*\w+,\s*(\w+)\s+(\d{1,2}),\s*(\d{4})/i);
+    const name = row[1].match(/desc-cell[^>]*>\s*<p>\s*<strong>([^<]+)<\/strong>/i)?.[1].trim();
+    if (!date || !name) continue;
+    const rel = BLS_RELEASES.find((r) => r.name === name);
+    const m = monthNum(date[1]);
+    if (!rel || !m) continue;
+    const eventDate = iso(Number(date[3]), m, Number(date[2]));
+    out.push({ kind: rel.kind, eventDate, knownSince: blsKnownSince(rel.kind, eventDate), source: "bls", title: rel.title, url });
+  }
+  return out;
+}
+
+/** Last year (history), this year and next year's schedules. Next year's page appears in the autumn. */
+export async function fetchBlsSchedules(today: string): Promise<SourceResult> {
+  const source = "bls";
+  const year = Number(today.slice(0, 4));
+  const years = [year - 2, year - 1, year, year + 1];
+  const pages = await Promise.allSettled(years.map((y) => getText(BLS_SCHEDULE(y))));
+  const events: EventRecord[] = [];
+  const missing: number[] = [];
+  pages.forEach((p, i) => {
+    const got = p.status === "fulfilled" ? parseBlsSchedule(p.value, BLS_SCHEDULE(years[i])) : [];
+    if (!got.length) missing.push(years[i]);
+    events.push(...got);
+  });
+  if (missing.includes(year) || !events.length) {
+    return { source, events, error: `no CPI / jobs dates parsed for ${missing.join(", ")} (page layout changed?)` };
+  }
+  return { source, events, note: missing.length ? `schedule not published yet: ${missing.join(", ")}` : undefined };
+}
+
+export async function fetchAllEvents(today: string): Promise<SourceResult[]> {
+  const [fed, cbsl, rss, bls] = await Promise.all([fetchFomc(), fetchCbslReviews(), fetchCbslRss(), fetchBlsSchedules(today)]);
+  return [...fed, cbsl, rss, bls];
 }

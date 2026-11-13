@@ -7,8 +7,9 @@
 RateCast shows today's SGD → LKR, SGD → USD and USD → LKR rates from Wise and a full-month view: past days show the actual
 rate, future days show a forecast. Every forecast is stored. Once the real rate is published, the miss is
 recorded, and those misses decide how future forecasts are made. Inputs are fetched automatically from
-Wise, the ECB, the US Treasury, FRED (Brent), the Federal Reserve and the Central Bank of Sri Lanka (official
-USD/LKR and SGD/LKR fixings, policy rate, T-bill yield, remittances, tourism, policy-review calendar). A model
+Wise, the ECB, the US Treasury, FRED (Brent, broad dollar index), the Federal Reserve, the US BLS release
+calendar (CPI, jobs report) and the Central Bank of Sri Lanka (official USD/LKR and SGD/LKR fixings, policy rate,
+T-bill yield, remittances, tourism, Colombo CPI, policy-review calendar). A model
 only gets weight once it is statistically better than the random walk ("no change").
 
 ---
@@ -46,8 +47,8 @@ only gets weight once it is statistically better than the random walk ("no chang
 | **Tomorrow & month-end forecast** | Forecast with an 80% likely range |
 | **Whole-month view** | Chart and day-by-day table: actual for past days, forecast for future days, and last month's rate for comparison |
 | **Provider comparison** | What the recipient gets for 1,000 SGD via Wise, Western Union and others |
-| **Market context** | 30-day trend, volatility, US-dollar strength (ECB), US 2-year yield and Brent oil (latest value + 30-day change), and cross-checks against two other rate sources. On the LKR tabs also the Sri Lanka central bank (CBSL) series: official USD/LKR and SGD/LKR rates, policy rate, 3-month T-bill yield, remittances and tourism earnings (year-on-year) |
-| **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart |
+| **Market context** | 30-day trend, volatility, US-dollar strength (ECB), US 2-year yield, Brent oil and the Fed broad dollar index (latest value + 30-day change), and cross-checks against two other rate sources. On the LKR tabs also the Sri Lanka central bank (CBSL) series: official USD/LKR and SGD/LKR rates, policy rate, 3-month T-bill yield, remittances and tourism earnings (year-on-year), Colombo CPI inflation |
+| **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart. US CPI and jobs-report days are shown too, without widening (the backtest showed the range already covers them) |
 | **Learning panel** | Accuracy by horizon vs a "no change" baseline, recent predicted-vs-actual deltas, current model weights ("not used" until a model is statistically better than "no change"), bias-correction status |
 | **Forecast performance** | Yesterday's forecast vs actual, today's forecast vs the live rate; MAPE, RMSE and MAE over 7/30/90 days next to the random walk; error by horizon (1/7/14/30 days) with how often the actual fell inside the 80% range; bias (too high/too low, only when statistically clear); improving/deteriorating vs the baseline; 30-day outlook (a direction only when today's rate is outside the forecast's 80% range); model version, training date, history coverage, live vs replayed forecast counts and the hardest pair |
 | **Model versions and learning log** | Each forecasting-code version is backtested automatically on its first run (last year replayed, scored vs the random walk) and compared with the previous version; every time the learner switches a model or the bias correction on or off is logged with its t-statistic |
@@ -116,14 +117,16 @@ All free, no API keys.
 | **Frankfurter (ECB)** | `api.frankfurter.dev/v1/<start>..<end>?base=USD&symbols=EUR,JPY,GBP,CNY` | "US-dollar strength" signal used by the market model and the Market context card | Each sync (45 days; ~14 months on first run) |
 | **US Treasury yield curve** | `home.treasury.gov/…/daily-treasury-rates.csv/<year>/all?type=daily_treasury_yield_curve…` | US 2-year yield (the market's expected Fed path) for the `macro` model and Market context card. The "2 Yr" column is found by header name, because the columns change between years | Each sync: current year (+ previous year in January; 3 years on first run). Fetched one year at a time with a 40 s timeout: the server is sometimes slow (0.6–19 s) |
 | **FRED Brent crude** | `fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILBRENTEU&cosd=<start>` | Oil price for the `macro` model and Market context card. EIA-sourced, so it runs ~1 week behind | Each sync (60 days; 800 days on first run) |
+| **FRED broad dollar index** | `fred.stlouisfed.org/graph/fredgraph.csv?id=DTWEXBGS&cosd=<start>` | Fed H.10 trade-weighted US dollar index (free stand-in for DXY), `macro` input for SGD → USD only. Weekly release, lag 10 days | Each sync (60 days; 800 days on first run) |
 | **ExchangeRate-API** | `open.er-api.com/v6/latest/SGD` | Independent cross-check of today's rate | Each sync |
 | **Currency-API** | `cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/…/sgd.json` | Independent cross-check of today's rate | Each sync |
 | **Fed FOMC calendar page** | `federalreserve.gov/monetarypolicy/fomccalendars.htm` | FOMC decision dates: history and next year's schedule | Each sync |
 | **Fed calendar feed** | `federalreserve.gov/json/calendar.json` | FOMC meeting dates (fallback, back to 2017) | Each sync |
+| **BLS release calendar** | `bls.gov/schedule/<year>/home.htm` (two years back, one ahead) | US CPI and Employment Situation (jobs report) release days, shown as events (no band widening) | Each sync |
 | **CBSL Monetary Policy Review list** | `cbsl.gov.lk/en/press/press-releases/monetary-policy-review` | Every past CBSL review date (from the PDF file names); the latest review PDF states the next date | Each sync |
 | **CBSL RSS** | `cbsl.gov.lk/en/rss.xml` | IMF-programme press releases, recorded after the fact | Each sync |
 | **CBSL exchange rates** | `cbsl.gov.lk/cbsl_custom/exrates/exrates_results_spot_mid.php` and `exrates_results.php` (form POST) | CBSL's daily indicative USD/LKR (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) fixings: input of `lanka` and `cbsl_gap`, and a cross-check. Lag 1 day | Each sync (120 days; 800 on first run) |
-| **CBSL statistical tables** | `.xlsx` linked from `cbsl.gov.lk/en/statistics/statistical-tables/…` (newest file picked by the date in its name) | Table 4.04: policy rate `lk_opr`, 3-month T-bill `lk_tbill3m` (lag 60 days). Tables 2.14.2 / 2.14.1: workers' remittances `lk_remit`, tourism earnings `lk_tourism` (USD mn, lag 45 days). Read with a dependency-free .xlsx reader | Each sync |
+| **CBSL statistical tables** | `.xlsx` linked from `cbsl.gov.lk/en/statistics/statistical-tables/…` (newest file picked by the date in its name) | Table 4.04: policy rate `lk_opr`, 3-month T-bill `lk_tbill3m` (lag 60 days). Tables 2.14.2 / 2.14.1: workers' remittances `lk_remit`, tourism earnings `lk_tourism` (USD mn, lag 45 days). Real sector `CCPI_and_CCPI_CORE_*.xlsx`: Colombo CPI inflation `lk_ccpi_yoy` (context only for now). Read with a dependency-free .xlsx reader | Each sync |
 
 ---
 

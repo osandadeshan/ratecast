@@ -223,7 +223,8 @@ function factorModel(ctx: ModelContext, H: number, all: readonly FactorSpec[]): 
   return out;
 }
 
-const MACRO_SPECS: FactorSpec[] = MACRO_FACTORS.map((m) => ({
+const MACRO_SPECS: (FactorSpec & { pairs?: readonly string[] })[] = MACRO_FACTORS.map((m) => ({
+  pairs: "pairs" in m ? m.pairs : undefined,
   series: m.series,
   kind: "move",
   lagDays: m.lagDays,
@@ -233,8 +234,9 @@ const MACRO_SPECS: FactorSpec[] = MACRO_FACTORS.map((m) => ({
   fadeDays: 3650, // effectively never: moves fade on their own (no new data past the known date)
 }));
 
-/** US 2-year yield and Brent oil, lagged (slow pass-through, e.g. oil → LKR import bill). */
-const macro: Model = (ctx, H) => factorModel(ctx, H, MACRO_SPECS);
+/** US 2-year yield, Brent oil and (SGD→USD only) the broad dollar index, lagged (slow pass-through, e.g. oil → LKR import bill). */
+const macro: Model = (ctx, H) =>
+  factorModel(ctx, H, MACRO_SPECS.filter((s) => !s.pairs || s.pairs.includes(ctx.pair ?? "")));
 
 /**
  * Sri Lanka data from the central bank (CBSL): the gap between CBSL's official fixing and the pair's
@@ -323,6 +325,47 @@ const news: Model = (ctx, H) => {
   );
 };
 
+/**
+ * ARIMA(p,1,0) without intercept: AR(p) on daily log returns over the last 250 days, p = 0..5 chosen by
+ * BIC, coefficients ridge-shrunk (λ = 0.1·n) and the forecast iterated with future returns predicted
+ * recursively, only from stationary fits (Σ|β| < 0.9). p = 0 (BIC's usual pick for FX) is the random walk. Non-trading days (flat returns) stay
+ * in the sample: they are part of the observed return process.
+ */
+const arima: Model = (ctx, H) => {
+  const r = diffs(ctx.series.logs.slice(-251));
+  const P = 5;
+  if (r.length < 120) return naive(ctx, H);
+  let best = { bic: Infinity, beta: [] as number[] };
+  for (let p = 0; p <= P; p++) {
+    const X: number[][] = [];
+    const y: number[] = [];
+    for (let i = P; i < r.length; i++) {
+      X.push(Array.from({ length: p }, (_, j) => r[i - 1 - j]));
+      y.push(r[i]);
+    }
+    const n = y.length;
+    const A = Array.from({ length: p }, (_, a) => Array.from({ length: p }, (_, b) => X.reduce((s, x) => s + x[a] * x[b], 0)));
+    const xy = Array.from({ length: p }, (_, a) => X.reduce((s, x, i) => s + x[a] * y[i], 0));
+    const trace = A.reduce((s, row, i) => s + row[i], 0) / Math.max(p, 1);
+    const beta = p ? ridgeSolve(A, xy, 0.1 * trace) : [];
+    const sse = y.reduce((s, v, i) => s + (v - X[i].reduce((t, x, j) => t + x * beta[j], 0)) ** 2, 0);
+    const bic = n * Math.log(sse / n || 1e-30) + p * Math.log(n);
+    // Σ|β| < 0.9 guarantees a stationary AR, so the iterated forecast can't run away (it did for USD→LKR
+    // at 31 days without this: 2.6% error vs 0.95% for the random walk).
+    if (bic < best.bic && beta.reduce((s, b) => s + Math.abs(b), 0) < 0.9) best = { bic, beta };
+  }
+  const hist = [...r];
+  const out: number[] = [];
+  let cum = last(ctx.series);
+  for (let h = 1; h <= H; h++) {
+    const next = best.beta.reduce((s, b, j) => s + b * hist[hist.length - 1 - j], 0);
+    hist.push(next);
+    cum += next;
+    out.push(cum);
+  }
+  return out;
+};
+
 export const MODELS: Record<string, Model> = {
   naive,
   drift,
@@ -335,6 +378,7 @@ export const MODELS: Record<string, Model> = {
   lanka,
   cross,
   cbsl_gap: cbslGap,
+  arima,
 };
 
 export const MODEL_NAMES = Object.keys(MODELS);
@@ -353,7 +397,8 @@ export const MODEL_LABELS: Record<string, string> = {
   monthly_pattern: "Last months' same-day path",
   mean_reversion: "Mean reversion",
   market: "USD-strength (ECB basket)",
-  macro: "US yields + oil (lagged)",
+  macro: "US yields, oil, dollar index (lagged)",
+  arima: "AR on daily returns (ARIMA p,1,0)",
   news: "Post-announcement drift",
   lanka: "Sri Lanka data (CBSL)",
   cross: "Two-part: SGD→USD × USD→LKR",

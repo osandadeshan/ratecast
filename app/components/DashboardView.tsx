@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { CurrencyDashboard, Dashboard } from "@/lib/dashboard";
 import { fmt, pct, shortDate, weekday } from "@/lib/format";
+import { EVENT_KINDS } from "@/lib/predict/events";
 import { MODEL_LABELS } from "@/lib/predict/models";
 import MonthChart from "./MonthChart";
 
@@ -349,7 +350,9 @@ function MarketCard({
                   ? `$${f.value.toFixed(2)}`
                   : f.format === "usdmn"
                     ? `$${f.value.toFixed(0)}m`
-                    : `${f.value.toFixed(2)} LKR`}{" "}
+                    : f.format === "index"
+                      ? f.value.toFixed(2)
+                      : `${f.value.toFixed(2)} LKR`}{" "}
               <span className="text-ink-3 font-normal text-xs">
                 {f.change30d == null
                   ? ""
@@ -398,9 +401,11 @@ function MarketCard({
 const MACRO_SOURCES = new Set([
   "treasury",
   "fred-brent",
+  "fred-usd-broad",
   "cbsl-fx",
   "cbsl-rates",
   "cbsl-external",
+  "cbsl-prices",
   "wise-history:LKR",
   "wise-history:USD",
   "wise-history:USDLKR",
@@ -418,6 +423,10 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
   const stats = c.stats?.events ?? [];
   const effect = (kind: string) => {
     const s = stats.find((x) => x.kind === kind);
+    const shown = !(EVENT_KINDS as Record<string, { widens: boolean }>)[kind]?.widens;
+    if (shown && s && s.n >= 4 && s.ratio >= 1.05)
+      return `past moves ≈ ${Math.sqrt(s.ratio).toFixed(1)}× a normal day (${s.n} past) · shown only: the range already covers these days`;
+    if (shown) return "shown only · range unchanged";
     if (!s || s.n < 4) return "not enough past events yet · range unchanged";
     if (s.ratio < 1.05) return `no bigger moves than usual (${s.n} past) · range unchanged`;
     return `past moves ≈ ${Math.sqrt(s.ratio).toFixed(1)}× a normal day (${s.n} past) · range widened`;

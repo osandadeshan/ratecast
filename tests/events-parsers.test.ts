@@ -7,6 +7,7 @@ import {
   classifyImf,
   parseCbslList,
   parseCbslNextDate,
+  parseBlsSchedule,
   parseCbslRss,
   parseFomcJson,
   parseFomcPage,
@@ -191,4 +192,26 @@ test("parseCbslRss keeps IMF items only, dated in Sri Lanka time, with an outcom
 test("parseCbslRss returns nothing for a feed without IMF items", () => {
   assert.deepEqual(parseCbslRss("<rss><channel><item><title>PMI expanded</title><pubDate>Fri, 30 Oct 2026 11:31:50 +0000</pubDate></item></channel></rss>"), []);
   assert.deepEqual(parseCbslRss(""), []);
+});
+
+const blsRow = (day: string, name: string, ref: string) =>
+  `<tr class="release-list-odd-row">\n<td class="date-cell"><p>${day}</p></td>\n<td class="time-cell"><p>08:30 AM</p></td>\n` +
+  `<td class="desc-cell"><p><strong>${name}</strong> for ${ref}</p></td></tr>\n`;
+
+test("parseBlsSchedule: CPI and jobs dates, exact release names only", () => {
+  const html =
+    `<table>` +
+    blsRow("Friday, January 10, 2025", "Employment Situation", "December 2024") +
+    blsRow("Wednesday, January 15, 2025", "Consumer Price Index", "December 2024") +
+    blsRow("Thursday, March 20, 2025", "Employment Situation of Veterans", "Annual 2024") +
+    blsRow("Thursday, December 18, 2025", "Consumer Price Index", "November 2025") +
+    blsRow("Friday, January 31, 2025", "Employment Cost Index", "Fourth Quarter 2024") +
+    `</table>`;
+  const ev = parseBlsSchedule(html, "https://www.bls.gov/schedule/2025/home.htm");
+  assert.deepEqual(
+    ev.map((e) => `${e.kind} ${e.eventDate} ${e.knownSince}`),
+    // 18 Dec is outside CPI's usual 10th–15th (moved by the 2025 shutdown): known only a week ahead.
+    ["us_jobs 2025-01-10 2024-12-01", "us_cpi 2025-01-15 2024-12-01", "us_cpi 2025-12-18 2025-12-11"],
+  );
+  assert.equal(parseBlsSchedule("<html>maintenance</html>", "x").length, 0);
 });

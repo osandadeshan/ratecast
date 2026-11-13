@@ -30,8 +30,8 @@
    (rises when the USD strengthens). Cross-check "today" rates from ExchangeRate-API and Currency-API →
    `xc:<CUR>:<source>`.
    Then **macro factors** (`ingestMacro`, step "1a"; see [Macro factors](#macro-factors-libsourcesmacrots)):
-   the US Treasury 2-year yield and FRED Brent go to `market_data` as `ust2y` and `brent`, each with its own
-   `source_health` row (`treasury`, `fred-brent`). Failures are logged and never fail the sync.
+   the US Treasury 2-year yield, FRED Brent and the FRED broad dollar index go to `market_data` as `ust2y`,
+   `brent` and `usd_broad`, each with its own `source_health` row (`treasury`, `fred-brent`, `fred-usd-broad`). Failures are logged and never fail the sync.
    Then **policy events** (`ingestEvents`, step "1b" in the code; see [Policy events](#policy-events)): fetch
    the Fed and CBSL calendars, upsert `events`, and record each scraper's outcome in `source_health`. A
    failing source is logged and never fails the sync.
@@ -71,11 +71,12 @@
 | `monthly_pattern` | path from the same day-of-month 1/2/3 months ago (weights 0.5/0.3/0.2), × 0.6 |
 | `mean_reversion` | pull to the 30-day mean at 4%/day |
 | `market` | β of the pair's daily returns on the ECB USD basket (90 days) × 10-day basket momentum, damped 0.9^k |
-| `macro` | **shadow model.** Ridge regression of daily returns on the lagged 5-day moves of the US 2y yield and Brent (see below) |
+| `macro` | **shadow model.** Ridge regression of daily returns on the lagged 5-day moves of the US 2y yield, Brent and (SGD→USD only) the broad dollar index (see below) |
 | `news` | **shadow model.** `naive` plus the learned post-announcement drift for a few days after a classified Fed/CBSL decision (see below) |
 | `lanka` | **shadow model, LKR pairs.** Same ridge factor model on `LANKA_FACTORS`: gap to CBSL's fixing, CBSL's 5-day USD/LKR move, policy rate and T-bill changes, YoY remittances and tourism, each with its own lag |
 | `cross` | **shadow model, SGD→LKR.** Today's rate moved by the summed log forecasts of the legs (SGD→USD `ensemble` + USD→LKR `ensemble`) |
 | `cbsl_gap` | **shadow model, LKR pairs.** Per-horizon no-intercept regression (365 days, shrunk toward 0) of the Wise move over h days on yesterday's gap ln(CBSL fixing / Wise). Wise drifts toward CBSL's own rate |
+| `arima` | ARIMA(p,1,0): AR(p) on 250 days of daily log returns, p = 0–5 by BIC, ridge-shrunk, only stationary fits (Σ\|β\| < 0.9), iterated forward. p = 0 = random walk. Gated like every model |
 
 ## Learning (`lib/predict/learning.ts`)
 
@@ -97,7 +98,8 @@ detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturd
   forecasts overlap heavily (17 horizons hit the same few target dates), and a first rule of "≥ 60 forecasts"
   promoted `macro` on thin evidence and hurt LKR 8–31 days.
 - 80% band: half-width `q80 · √(h / meanH_b)`, where q80 = empirical 80th percentile of the bucket's |ensemble log
-  error| normalised to the bucket's mean horizon (n ≥ 30); fallback 1.2816 × (RMS or daily vol × √h). Event
+  error| normalised to the bucket's mean horizon (n ≥ 30), each error weighted by 0.5^(target age / 30 days)
+  (`BAND_HALF_LIFE_DAYS`, so the band follows a change of regime within weeks); fallback 1.2816 × (RMS or daily vol × √h). Event
   variance is added in quadrature (see below). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
 
 ## Macro factors (`lib/sources/macro.ts`)
@@ -115,6 +117,7 @@ FRED fredgraph.csv?id=DCOILBRENTEU ───────────────
 |---|---|---|---|---|
 | `ust2y` | home.treasury.gov CSV, one file per year; the `2 Yr` column is found by header name (columns differ by year) | 1 day | diff (pp) | slow and erratic (0.6–19 s per CSV), so years are fetched one at a time with a 40 s timeout. First run fetches 3 years (≈ 1 min), then only the current year (plus last year in January) |
 | `brent` | FRED `DCOILBRENTEU` graph CSV (keyless) | 9 days | log | EIA-sourced, published ~1 week late (latest was Nov 3 on Nov 11). `.` = missing. First run 800 days, then 60 |
+| `usd_broad` | FRED `DTWEXBGS` graph CSV (Fed H.10 broad dollar index) | 10 days | log | weekly release (Mon 16:15 ET) with data to the previous Friday. Feeds `macro` for SGD→USD only (`pairs: ["USD"]`) |
 
 `MACRO_FACTORS` (`lib/config.ts`) holds the lags. `factorsAt` restricts each series to `date ≤ anchor −
 lagDays` for **both** replay and live, so the backtest sees exactly what a live run would have seen, even
