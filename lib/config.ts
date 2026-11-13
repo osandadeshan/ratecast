@@ -34,16 +34,7 @@ export const REPLAY_BUDGET_MS = Number(process.env.REPLAY_BUDGET_MS) || 40_000;
 /** Window of evaluated predictions used for weights / bias. */
 export const LEARNING_WINDOW_DAYS = 180;
 
-/**
- * How a pair is shown on the page when that differs from how it is stored and forecast. USD→LKR is
- * stored, learned and forecast as USD→LKR (CBSL's fixing and the SGD→LKR legs are quoted that way), but
- * shown as LKR → USD per 1,000 LKR: every displayed number is `per / rate` (bands swap ends).
- */
-export const DISPLAY: Partial<Record<Target, { base: string; quote: string; label: string; per: number; decimals: number }>> = {
-  USDLKR: { base: "LKR", quote: "USD", label: "LKR → USD", per: 1000, decimals: 4 },
-};
-
-/** Decimal places shown per target currency (stored orientation; see DISPLAY for inverted pairs). */
+/** Decimal places shown per target currency. */
 export const DECIMALS: Record<Target, number> = { LKR: 3, USD: 5, USDLKR: 3 };
 
 /** Horizon buckets for learned stats (inclusive upper bounds). */
