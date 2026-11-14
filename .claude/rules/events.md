@@ -30,7 +30,7 @@ paths:
 - `ingestEvents()` in `sync.ts` writes `source_health`: `last_ok_at`/`last_note` on success,
   `last_error_at`/`last_error` on failure. An event failure must never fail the sync.
 - Keep parse functions **pure and exported** (`parseFomcPage`, `parseFomcJson`, `parseCbslList`,
-  `parseCbslNextDate`, `parseCbslRss`) so they can be tested on saved HTML/PDF.
+  `parseCbslNextDate`, `parseCbslRss`, `parseBlsSchedule`) so they can be tested on saved HTML/PDF.
 - All fetches go through `lib/sources/http.ts` (`getText`, `getBytes`, `getJSON`): generic UA, timeout, no-store.
 
 ## Sources and how they break
@@ -40,7 +40,7 @@ paths:
 | `fed-json` | federalreserve.gov/json/calendar.json | `type: "FOMC"` + title `FOMC Meeting` (case varies), `month` + last number of `days`. | Fallback/redundancy. Covers 2017 → end of the current year only. |
 | `cbsl-mpr` | cbsl.gov.lk/en/press/press-releases/monetary-policy-review | Past review dates from PDF file names `press_YYYYMMDD_Monetary_Policy_Review_No_N_YYYY_*.pdf`. Next date from the **latest PDF** via `pdfText()`: `next regular statement … will be on D Month YYYY`, matched on whitespace-free text (`compact()`). | The year's last statement (Nov/Dec) names no next date → `note`, not error. Missing next date in other months → error. PDF text uses odd spacing, so always match compacted text. |
 | `bls` | bls.gov/schedule/YYYY/home.htm (years y−2 … y+1) | `<tr>` rows: `date-cell` "Weekday, Month D, YYYY" + `desc-cell` `<strong>` release name. Exact names only: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (not "… Average Price", "State Employment …"). | A missing current year or 0 rows → error. A missing future year → note "schedule not published yet". |
-| `cbsl-rss` | cbsl.gov.lk/en/rss.xml | Items whose title matches the IMF regex (`IMF`, `International Monetary Fund`, `EFF`, `staff-level agreement`), dated in `Asia/Colombo`. | Only ~10 latest items, so it only collects going forward (daily polling is enough). |
+| `cbsl-rss` | cbsl.gov.lk/en/rss.xml | Items whose title matches the IMF regex (`IMF`, `International Monetary Fund`, `Extended Fund Facility`, `EFF`, `staff-level agreement`), dated in `Asia/Colombo`. | Only ~10 latest items, so it only collects going forward (daily polling is enough). |
 
 - `lib/sources/pdf.ts` is a dependency-free extractor (inflates FlateDecode streams, reads `Tj`/`TJ` literal
   strings). It handles simple Latin PDFs only. If CBSL switches to hex/CID fonts, it returns empty text and the
@@ -68,8 +68,8 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
   around any **band-widening** event (so `widens: false` kinds change nothing). `base2` = its mean square (needs ≥ 60 days).
 - Per kind: `ratio = (Σ move² + 6·base2) / (n + 6) / base2`, floored at 1, with a minimum of 4 events
   (otherwise ratio = 1). It only uses events with `E + 1 <= asOf`.
-- Band: `sigma = sqrt(sigma_learned² + Σ (ratio − 1)·base2)`, adding one term per known event with
-  `anchor <= E` and `E + 1 <= target`. The point forecast is untouched.
+- Band: `eventExtraVar` sums `(ratio − 1)·base2` over known band-widening events with `anchor <= E` and
+  `E + 1 <= target`; `engine.ts` sets half-width = `sqrt(half_learned² + Z80² · extra)`. The point forecast is untouched.
 - The learned ratios are stored as `model_stats.stats.events` (`EventVolStat[]`) and shown in the Policy events card.
 
 ## Outcomes: what was decided (`events.outcome`)
@@ -82,6 +82,9 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
   | `fomc` | `newsevents/pressreleases/monetaryYYYYMMDDa.htm` (the event's own statement) | `decided to (lower\|reduce\|cut\|maintain\|keep\|raise\|increase) … target range` | `cut` / `hold` / `hike` |
   | `cbsl_policy` | the review's own PDF (`event.url`) | headline after `TheCentralBankofSriLanka` (compacted), up to `TheMonetaryPolicyBoard` | `hike` if `increases\|raises\|tightens\|hikes`, else `cut` if `reduces\|lowers\|eases\|cuts\|decreases`, else `hold` if `keeps\|maintains\|unchanged\|holds\|leaves` |
   | `imf` | the RSS title (set at parse time) | `staff-level agreement` / `executive board\|approv\|disburse` | `sla` / `board` / `other` |
+- Phantom events: a pending row whose own statement doesn't exist (FOMC 404, CBSL PDF not on the list) and whose
+  date is ≥ 7 days past is deleted (CBSL only when `cbsl-mpr` was read in this run). The daily scrape brings the
+  real date back.
 - **Ordering trap:** "incr**eases**" contains "eases". Always test tightening words before easing words.
 - Unparsable → `'unclear'`, stored so it isn't refetched every day. `categoryOf()` ignores `unclear`.
 - **Never classify from a different statement.** A scheduled CBSL row's `url` points to the *previous* review
@@ -106,7 +109,7 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
 
 ## Verify
 ```bash
-npm run sync | grep events:     # "events: N rows · fed-page 56, fed-json 63, cbsl-mpr 13, cbsl-rss 0"
+npm run sync | grep events:     # "events: N rows · fed-page 56, fed-json 63, cbsl-mpr 13, cbsl-rss 0, bls N"
 curl -s localhost:3123/api/dashboard | jq '.events | {upcoming, health}'
 docker exec ratecast-pg psql -U postgres -d rates -c "SELECT * FROM source_health;" \
   -c "SELECT kind, count(*), min(event_date), max(event_date) FROM events GROUP BY 1;" \

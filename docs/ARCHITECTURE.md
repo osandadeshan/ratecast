@@ -28,39 +28,57 @@
 
 1. **Lock.** One row in `sync_lock`. A concurrent run returns `skipped`, and the lock expires after 5 min.
 2. **Market data.** Frankfurter `USD → EUR, JPY, GBP, CNY` time series → `usd_basket` = mean of the logs
-   (rises when the USD strengthens). Cross-check "today" rates from ExchangeRate-API and Currency-API →
-   `xc:<CUR>:<source>`.
-   Then **macro factors** (`ingestMacro`, step "1a"; see [Macro factors](#macro-factors-libsourcesmacrots)):
+   (rises when the USD strengthens): 420 days while there are < 200 rows, otherwise 45. Cross-check "today"
+   rates from ExchangeRate-API and Currency-API → `xc:<pair>:<source>` (USD→LKR is derived from each source's
+   SGD quotes).
+   Then **macro factors and Sri Lanka series** (`ingestMacro`, step "1a"; see [Macro factors](#macro-factors-libsourcesmacrots)):
    the US Treasury 2-year yield, FRED Brent and the FRED broad dollar index go to `market_data` as `ust2y`,
-   `brent` and `usd_broad`, each with its own `source_health` row (`treasury`, `fred-brent`, `fred-usd-broad`). Failures are logged and never fail the sync.
+   `brent` and `usd_broad`, each with its own `source_health` row (`treasury`, `fred-brent`, `fred-usd-broad`).
+   The same step fetches the **Sri Lanka series** (`SRI_LANKA_SERIES` in `lib/sources/srilanka.ts`): CBSL's daily
+   indicative USD/LKR (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) via its rate-lookup form, and monthly policy rate
+   (`lk_opr`), 3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`), tourism earnings (`lk_tourism`)
+   and Colombo CPI inflation (`lk_ccpi_yoy`, context only) from CBSL's statistical .xlsx tables (read by the
+   dependency-free `srilanka-xlsx.ts`): 800 days while a series has < 20 rows, otherwise 120. Health rows
+   `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices` (series that share a source report together; the row
+   is an error only if all of them failed). All jobs run in parallel; failures are logged and never fail the sync.
    Then **policy events** (`ingestEvents`, step "1b" in the code; see [Policy events](#policy-events)): fetch
-   the Fed and CBSL calendars, upsert `events`, and record each scraper's outcome in `source_health`. A
+   the Fed, CBSL and BLS calendars, upsert `events`, and record each scraper's outcome in `source_health`. A
    failing source is logged and never fails the sync.
    Then **decision outcomes** (`classifyOutcomes`; see [Decision outcomes](#decision-outcomes-and-post-announcement-drift)):
-   past events (within 800 days) with no `outcome` get their own statement read and classified, at most 32
-   fetches per run, newest first. Health row `outcomes`.
-3. **Ingest each currency.**
-   - Wise history: 2 years on first run (< 300 rows), otherwise 3 months. Upserted as `source='wise'`.
-   - Wise comparison: the mid-market rate plus up to 3 providers' quotes for 1,000 SGD → `live_quotes`, and
-     today's provisional `rates_history` row (`wise_live`), which never overwrites a `wise` row.
+   past `OUTCOME_KINDS` events (within 800 days) with no `outcome` get their own statement read and classified,
+   at most 32 fetches per run, newest first. A scheduled date that passed ≥ 7 days ago without its own statement
+   (FOMC 404, or a CBSL date with no PDF of its own while the CBSL list was read in this run) is deleted as a
+   meeting that never happened. Health row `outcomes`.
+3. **Ingest each pair.**
+   - Wise history: 2 years on first run (< 300 rows), otherwise 3 months. Checked by `validateHistory`
+     (`lib/sources/validate.ts`) against the last stored point, then upserted as `source='wise'`. Health row
+     `wise-history:<pair>`; a failed fetch keeps the stored history.
+   - Wise comparison: the mid-market rate plus up to 3 providers' quotes for 1,000 of the base currency →
+     `live_quotes`, and today's provisional `rates_history` row (`wise_live`), which never overwrites a `wise`
+     row. Checked by `validateLive` first. Health row `wise-live:<pair>`.
+   - Then `checkCrossRate`: SGD→LKR vs SGD→USD × USD→LKR on the latest common official date (limit 0.5%),
+     health row `cross-rate`.
 4. **Evaluate.** A single INSERT…SELECT joins `predictions` to official `rates_history` rows and writes every
    not-yet-scored prediction to `prediction_errors` with `delta = actual − predicted`,
    `pct_error = (predicted − actual)/actual × 100` and `log_error = ln(predicted/actual)`. It runs after `ANALYZE`
    inside a transaction with `SET LOCAL enable_nestloop = off`: after a 365-day replay the planner otherwise picked
    nested loops (13 min instead of 8 s).
-   Then **Sri Lanka series** (`SRI_LANKA_SERIES` in `lib/sources/srilanka.ts`): CBSL's daily indicative USD/LKR
-   (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) via its rate-lookup form, and monthly policy rate (`lk_opr`),
-   3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`), tourism earnings (`lk_tourism`) and Colombo
-   CPI inflation (`lk_ccpi_yoy`, context only) from CBSL's statistical .xlsx tables (read by the dependency-free
-   `srilanka-xlsx.ts`). Health rows `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices`.
 5. **Replay missed days.** Pairs run in `PREDICT_ORDER` (SGD→USD, USD→LKR, then SGD→LKR, whose `cross` model
    reads the legs' `ensemble` rows for the same anchor). For each day `t` in the last 365 days
-   (`BACKFILL_DAYS`) with no `ensemble` forecast (all of them on first run, or gaps if the cron missed a day),
-   within `REPLAY_BUDGET_MS` (40 s; the rest continues next run): learn from errors with target ≤ t, forecast from rates ≤ t,
-   insert, and push the realised errors into memory so day t+1 learns from them. This is a backtest.
-6. **Forecast today.** The anchor is today's live Wise rate (or yesterday's official rate if Wise failed).
-   Horizons 1..31. Rows for the same `made_on` are upserted, so re-running on the same day just refreshes them.
-7. **Snapshot.** The `LearnedStats` JSON goes to `model_stats`, then old predictions and quotes are pruned.
+   (`BACKFILL_DAYS`) that has an official rate and no `ensemble` forecast (all of them on first run, or gaps if
+   the cron missed a day), within `REPLAY_BUDGET_MS` (40 s from sync start; the rest continues next run, and the
+   run ends as `partial`): learn from errors with target ≤ t, forecast from rates ≤ t, insert as
+   `origin = 'replay'`, and push the realised errors into memory so day t+1 learns from them. This is a backtest.
+6. **Forecast today.** The anchor is today's live Wise rate (or the latest stored rate, carried forward, if there
+   is no quote for today). Horizons 1..31, inserted as `origin = 'live'`. Inserts are `ON CONFLICT DO NOTHING`, so
+   a second run on the same day keeps the first forecast. Then the `LearnedStats` JSON goes to `model_stats`
+   (one row per pair and day) and promotions/demotions since the previous day go to `learning_log`. After all
+   pairs, the newly replayed forecasts are evaluated again.
+7. **Version backtest** (step 4b in the code, only when the replay is complete; see
+   [Version backtest](#version-backtest-and-learning-log)).
+8. **Prune.** Predictions of models other than `ensemble` and `naive` with a target older than
+   `PRUNE_MODELS_AFTER_DAYS` (550) and `live_quotes` older than 60 days are deleted. The `sync_runs` row ends as
+   `ok` or `partial` (`partial` keeps `needsSync()` true, so the next page view or cron continues).
 
 ## Models (`lib/predict/models.ts`, all on log rates)
 
@@ -76,7 +94,7 @@
 | `news` | **shadow model.** `naive` plus the learned post-announcement drift for a few days after a classified Fed/CBSL decision (see below) |
 | `lanka` | **shadow model, LKR pairs.** Same ridge factor model on `LANKA_FACTORS`: gap to CBSL's fixing, CBSL's 5-day USD/LKR move, policy rate and T-bill changes, YoY remittances and tourism, each with its own lag |
 | `cross` | **shadow model, SGD→LKR.** Today's rate moved by the summed log forecasts of the legs (SGD→USD `ensemble` + USD→LKR `ensemble`) |
-| `cbsl_gap` | **shadow model, LKR pairs.** Per-horizon no-intercept regression (365 days, shrunk toward 0) of the Wise move over h days on yesterday's gap ln(CBSL fixing / Wise). Wise drifts toward CBSL's own rate |
+| `cbsl_gap` | **shadow model, LKR pairs.** Per-horizon no-intercept regression (365 days, ≥ 120 observations, shrunk toward 0 by 60 pseudo-observations, β clamped to [−1, 1.5]) of the Wise move over h days on the gap ln(latest CBSL fixing dated ≤ t − 1 / Wise rate on t). Wise drifts toward CBSL's own rate |
 | `arima` | ARIMA(p,1,0): AR(p) on 250 days of daily log returns, p = 0–5 by BIC, ridge-shrunk, only stationary fits (Σ\|β\| < 0.9), iterated forward. p = 0 = random walk. Gated like every model |
 
 ## Learning (`lib/predict/learning.ts`)
@@ -85,7 +103,8 @@ For each horizon bucket b ∈ {1, 3, 7, 14, 31}, over evaluated errors with targ
 detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturday's):
 
 - `MAE_m` = mean |log error| of model m. Shrunk: `(n·MAE_m + 10·MAE_pooled)/(n + 10)`.
-- `w_m ∝ 1 / MAE_shrunk^4`, normalised. With no data, weights are equal.
+- `w_m ∝ 1 / MAE_shrunk^4`, normalised. With no data, only `naive` has weight (every other model starts
+  unpromoted, see below).
 - `blend = Σ w_m · f_m` (log space).
 - `bias` = exponentially recency-weighted (half-life 14 days) mean log error of `blend`, × n/(n + 15).
 - `blend_bc = blend − bias` is always stored, so its accuracy can be measured.
@@ -93,15 +112,15 @@ detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturd
 - **Every model except `naive` is gated** (`SHADOW_MODELS` only labels the external-data ones in the UI). A model
   gets `w = 0` in a bucket until **promoted**: scored on ≥ 30 *distinct* target dates in the window and a paired
   t-test on per-date mean |error| vs `naive` gives t < −2.6, with n_eff = dates / bucket mean horizon (neighbouring
-  forecasts overlap). 2.6 ≈ Bonferroni for ~10 candidates per bucket at 5% family-wise. Unpromoted shadow models are also left out of `MAE_pooled`, so they can't
+  forecasts overlap). 2.6 ≈ Bonferroni for ~10 candidates per bucket at 5% family-wise. Unpromoted models are also left out of `MAE_pooled`, so they can't
   shift the other weights. The flag is stored per bucket in `BucketStats.promoted` and is re-evaluated every
   day, so a model can be promoted and demoted automatically. Distinct dates, not raw counts: long-horizon
   forecasts overlap heavily (17 horizons hit the same few target dates), and a first rule of "≥ 60 forecasts"
   promoted `macro` on thin evidence and hurt LKR 8–31 days.
 - 80% band: half-width `q80 · √(h / meanH_b)`, where q80 = empirical 80th percentile of the bucket's |ensemble log
   error| normalised to the bucket's mean horizon (n ≥ 30), each error weighted by 0.5^(target age / 30 days)
-  (`BAND_HALF_LIFE_DAYS`, so the band follows a change of regime within weeks); fallback 1.2816 × (RMS or daily vol × √h). Event
-  variance is added in quadrature (see below). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
+  (`BAND_HALF_LIFE_DAYS`, so the band follows a change of regime within weeks); fallback 1.2816 × (RMS of the
+  bucket's ensemble log errors if n ≥ 10, else 60-day daily vol × √h). Event variance is added in quadrature (see below). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
 
 ## Macro factors (`lib/sources/macro.ts`)
 
@@ -119,7 +138,7 @@ FRED fredgraph.csv?id=DTWEXBGS ────────────────�
 |---|---|---|---|---|
 | `ust2y` | home.treasury.gov CSV, one file per year; the `2 Yr` column is found by header name (columns differ by year) | 1 day | diff (pp) | slow and erratic (0.6–19 s per CSV), so years are fetched one at a time with a 40 s timeout. First run fetches 3 years (≈ 1 min), then only the current year (plus last year in January) |
 | `brent` | FRED `DCOILBRENTEU` graph CSV (keyless) | 9 days | log | EIA-sourced, published ~1 week late (latest was Nov 3 on Nov 11). `.` = missing. First run 800 days, then 60 |
-| `usd_broad` | FRED `DTWEXBGS` graph CSV (Fed H.10 broad dollar index) | 10 days | log | weekly release (Mon 16:15 ET) with data to the previous Friday. Feeds `macro` for SGD→USD only (`pairs: ["USD"]`) |
+| `usd_broad` | FRED `DTWEXBGS` graph CSV (Fed H.10 broad dollar index) | 10 days | log | weekly release (Mon 16:15 ET) with data to the previous Friday. Feeds `macro` for SGD→USD only (`pairs: ["USD"]`). First run 800 days, then 60 |
 
 `MACRO_FACTORS` (`lib/config.ts`) holds the lags. `factorsAt` restricts each series to `date ≤ anchor −
 lagDays` for **both** replay and live, so the backtest sees exactly what a live run would have seen, even
@@ -145,7 +164,8 @@ Fed fomccalendars.htm ─┐                                             ┌─�
 Fed calendar.json ─────┤                                             │      ratio per kind (EventVolStat)
 CBSL MPR list page ────┼─▶ fetchAllEvents ─▶ ingestEvents ─▶ events ─┤
 CBSL latest MPR PDF ───┤   (SourceResult[])   (runSync 1b)  source_  └─▶ eventExtraVar(known events, t, target)
-CBSL rss.xml ──────────┘                                    health          ─▶ engine.ts ensemble band only
+CBSL rss.xml ──────────┤                                    health          ─▶ engine.ts ensemble band only
+BLS schedule pages ────┘
                                                               │
                               lib/dashboard.ts: .events {upcoming, recent, health}, MonthDay.events
                               UI: "Policy events" card, dotted chart markers + tooltip row
@@ -157,7 +177,7 @@ CBSL rss.xml ──────────┘                                  
 |---|---|---|---|
 | `fed-page` | FOMC page: "YYYY FOMC Meetings" sections, history from 2021 and next year's schedule | `parseFomcPage`: month token (`June`, `Apr/May`) + days token (`16-17*`); decision = last day; skips notation votes/cancelled | event − 300 days (schedule is published > 1 year ahead); unscheduled meetings = event date |
 | `fed-json` | Fed calendar JSON, `type: "FOMC"`, title `FOMC Meeting` (2017 → this year) | `parseFomcJson` | same as above |
-| `cbsl-mpr` | CBSL Monetary Policy Review list: date from each PDF name `press_YYYYMMDD_Monetary_Policy_Review_…pdf` | `parseCbslList` | previous review's date (each statement names the next), else event − 56 days |
+| `cbsl-mpr` | CBSL Monetary Policy Review list: date from each PDF name `press_YYYYMMDD_Monetary_Policy_Review_…pdf` | `parseCbslList` | previous review's date if it is at most 120 days earlier (each statement names the next), else event − 56 days |
 | `cbsl-mpr` (next) | the latest review PDF: "The release of the next regular statement … will be on 20 November 2026" | `pdfText` (built-in `node:zlib`, no dependency) + `parseCbslNextDate` on whitespace-free text | the latest review's date |
 | `cbsl-rss` | CBSL press releases whose titles mention the IMF / EFF / staff-level agreement | `parseCbslRss`, dated in Asia/Colombo | event date (after the fact only) |
 | `bls` | BLS release schedule `bls.gov/schedule/YYYY/home.htm`, years y−2 … y+1: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (exact names) | `parseBlsSchedule` (`date-cell` + `desc-cell` rows) | Dec 1 of the previous year if the day is in the usual range (CPI 10–15, jobs 1–10), else date − 7 (rescheduled release) |
@@ -255,12 +275,12 @@ Before 2026-11-14 the first flagged provider in the list won, which could show R
 - The month table/chart, per day: official or live actual; the latest `ensemble` forecast made before that
   day (`DISTINCT ON target_date ORDER BY made_on DESC`); the rate on the same day last month.
 - The accuracy panel: `ensemble` vs `naive` MAE per bucket over the last 60 days, plus % of forecasts
-  within 0.25%.
+  within 0.25%. Target dates on non-trading weekdays (`stats.nonTradingDow`, default Sunday) are left out.
 - Performance card (`lib/performance.ts`, pure): one query of scored `ensemble` + `naive` forecasts at
   horizons 1/7/14/30 for the last 120 days (joined to the prediction for its 80% band and `origin`).
   Non-trading weekdays are dropped. It gives MAPE/RMSE/MAE vs the random walk on the same dates over
-  7/30/90 days (next-day), per-horizon error + 80% coverage over 90 days, a bias t-test (|t| > 2) on signed
-  next-day errors, and a trend verdict: |error| − |random-walk error| for the last 30 days vs the prior 30
+  7/30/90 days (next-day), per-horizon error + 80% coverage over 90 days, a bias t-test (|t| > 2, n ≥ 10) on
+  signed next-day errors over 90 days, and a trend verdict: |error| − |random-walk error| for the last 30 days vs the prior 30
   (Welch t, |t| > 2). The outlook only names a direction when today's rate is outside the 30-day forecast's
   80% range. `.hardest` = pair with the highest 30-day next-day MAPE (n ≥ 10).
 - Data sources card: `.freshness` (first/latest date per series vs a max age from `SERIES_CATALOG`),
@@ -270,18 +290,21 @@ Before 2026-11-14 the first flagged provider in the list won, which could show R
 - Policy events: one query for events with `known_since ≤ today` within −45/+75 days (`.events.upcoming`,
   `.events.recent`, plus short labels on each `MonthDay.events`) and one for `source_health`
   (`.events.health`). Shared across currencies; the per-currency effect comes from `stats.events`.
-- Macro factors: `.macro[]` = latest value, date and 30-day change (pp for yields, % for prices) of each
-  `MACRO_FACTORS` series, shown in the Market context card. The weights table shows `shadow` for an
-  unpromoted shadow model (`stats.buckets[].promoted`).
+- Macro factors: `.macro[]` = latest value, date and 30-day change (pp for yields and rates, % for prices) of
+  each `MACRO_FACTORS` and `SRI_LANKA_META` series (remittances and tourism: change vs a year earlier), shown
+  in the Market context card (Sri Lanka series only on LKR pairs). The weights table shows "not used" for
+  any model not promoted in that bucket (`stats.buckets[].promoted[m] === false`).
 - Outcomes: `EventView.outcome` is shown as a badge (cut / hold / hike / staff deal / approved) in the
-  card's Recent list. Source health is split by card: `treasury` and `fred-brent` show in Market context,
-  everything else (Fed, CBSL, `outcomes`) in Policy events.
+  card's Recent list. Source health is split by card (`MACRO_SOURCES` in `DashboardView.tsx`): `treasury`,
+  `fred-brent`, `fred-usd-broad`, `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices` and `wise-history:*`
+  show in Market context, everything else (Fed, CBSL review list and RSS, `bls`, `outcomes`, `wise-live:*`,
+  `cross-rate`) in Policy events. The Data sources card lists all of them.
 - Without `DATABASE_URL`, the page still renders today's live rates and shows a setup notice.
 
 ## Endpoints
 
 | route | purpose | auth |
 |---|---|---|
-| `/` | dashboard (PPR shell + streamed data) | none |
+| `/` | dashboard (PPR shell + streamed data; `maxDuration` 60) | none |
 | `/api/dashboard` | JSON of the same data, CDN-cached 2 min | none |
-| `/api/cron/sync` | run a sync | `Authorization: Bearer $CRON_SECRET` (if set) |
+| `/api/cron/sync` | run a sync (`maxDuration` 300, backtest deadline 240 s) | `Authorization: Bearer $CRON_SECRET`. Fails closed: on a deployment without `CRON_SECRET` it returns 500; only local `next dev` runs without a secret |

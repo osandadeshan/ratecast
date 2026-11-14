@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS market_data (
   PRIMARY KEY (series, date)
 );
 
--- Every forecast every model makes. model = drift|holt|monthly_pattern|mean_reversion|market|blend|blend_bc|ensemble
+-- Every forecast every model makes. model = one of MODELS (lib/predict/models.ts) or blend|blend_bc|ensemble
 CREATE TABLE IF NOT EXISTS predictions (
   id            bigserial PRIMARY KEY,
   currency      text NOT NULL,
@@ -94,13 +94,13 @@ CREATE TABLE IF NOT EXISTS model_stats (
   PRIMARY KEY (currency, as_of)
 );
 
--- Policy events, fetched automatically (FOMC, CBSL reviews, IMF news). kind is data: never rename.
+-- Policy events, fetched automatically (FOMC, CBSL reviews, IMF news, BLS CPI/jobs days). kind is data: never rename.
 -- known_since = first day the event and its date were public (no-look-ahead gate for replay).
 CREATE TABLE IF NOT EXISTS events (
-  kind        text NOT NULL,                 -- fomc | cbsl_policy | imf
+  kind        text NOT NULL,                 -- fomc | cbsl_policy | imf | us_cpi | us_jobs
   event_date  date NOT NULL,                 -- announcement date (institution's local date)
   known_since date NOT NULL,
-  source      text NOT NULL,                 -- fed-page | fed-json | cbsl-mpr | cbsl-rss
+  source      text NOT NULL,                 -- fed-page | fed-json | cbsl-mpr | cbsl-rss | bls
   title       text NOT NULL,
   url         text,
   updated_at  timestamptz NOT NULL DEFAULT now(),

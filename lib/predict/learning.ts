@@ -33,7 +33,7 @@ export interface BucketStats {
   q80?: number | null;
   /**
    * Every model except `naive`: true once it has beaten the random walk in this bucket (enough
-   * distinct target dates and MAE < 0.98 × naive). false = scored but weight 0.
+   * distinct target dates and a paired t < −2.6 on per-date |error| vs naive). false = scored but weight 0.
    */
   promoted?: Record<string, boolean>;
   /**

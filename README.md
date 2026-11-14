@@ -25,7 +25,7 @@ only gets weight once it is statistically better than the random walk ("no chang
 7. [How a page view works](#how-a-page-view-works)
 8. [Forecasting models](#forecasting-models)
 9. [The learning loop (auto-learn and correct)](#the-learning-loop-auto-learn-and-correct)
-10. [Policy events (Fed, CBSL)](#policy-events-fed-cbsl)
+10. [Policy events (Fed, CBSL, US data releases)](#policy-events-fed-cbsl-us-data-releases)
 11. [Database design](#database-design)
 12. [API endpoints](#api-endpoints)
 13. [Project structure](#project-structure)
@@ -46,7 +46,7 @@ only gets weight once it is statistically better than the random walk ("no chang
 | **Same day last month** | Rate on this date last month and how far it has moved since |
 | **Tomorrow & month-end forecast** | Forecast with an 80% likely range |
 | **Whole-month view** | Chart and day-by-day table: actual for past days, forecast for future days, and last month's rate for comparison |
-| **Provider comparison** | What the recipient gets for 1,000 SGD via Wise, Western Union and others |
+| **Provider comparison** | What the recipient gets for 1,000 SGD (1,000 USD on the USD → LKR tab) via Wise and other popular providers (Wise's comparison API, `numberOfProviders=3`) |
 | **Market context** | 30-day trend, volatility, US-dollar strength (ECB), US 2-year yield, Brent oil and the Fed broad dollar index (latest value + 30-day change), and cross-checks against two other rate sources. On the LKR tabs also the Sri Lanka central bank (CBSL) series: official USD/LKR and SGD/LKR rates, policy rate, 3-month T-bill yield, remittances and tourism earnings (year-on-year), Colombo CPI inflation |
 | **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart. US CPI and jobs-report days are shown too, without widening (the backtest showed the range already covers them) |
 | **Learning panel** | Accuracy by horizon vs a "no change" baseline, recent predicted-vs-actual deltas, current model weights ("not used" until a model is statistically better than "no change"), bias-correction status |
@@ -66,8 +66,8 @@ flowchart LR
         W2["Wise comparisons<br/>live rate + providers"]
         F["Frankfurter / ECB<br/>USD vs EUR, JPY, GBP, CNY"]
         X["ExchangeRate-API<br/>Currency-API"]
-        EV["Fed FOMC calendar<br/>CBSL policy reviews + RSS"]
-        MF["US Treasury yields<br/>FRED Brent oil"]
+        EV["Fed FOMC calendar<br/>CBSL policy reviews + RSS<br/>BLS release calendar"]
+        MF["US Treasury yields<br/>FRED Brent oil + broad dollar index"]
         LK["CBSL official rates<br/>+ statistical tables .xlsx"]
     end
 
@@ -79,7 +79,7 @@ flowchart LR
     end
 
     subgraph Neon["Neon Postgres, Singapore"]
-        DB[("rates_history<br/>live_quotes<br/>market_data<br/>events<br/>source_health<br/>predictions<br/>prediction_errors<br/>model_stats<br/>sync_runs")]
+        DB[("rates_history<br/>live_quotes<br/>market_data<br/>events<br/>source_health<br/>predictions<br/>prediction_errors<br/>model_stats<br/>model_versions<br/>learning_log<br/>sync_runs")]
     end
 
     C -->|triggers| S
@@ -113,13 +113,13 @@ All free, no API keys.
 | Source | Endpoint | Used for | Fetched |
 |---|---|---|---|
 | **Wise rate history** | `wise.com/rates/history?source=SGD|USD&target=…&resolution=daily` | Official daily rates: the "actual" values forecasts are scored against, and model input | Each sync (3 months; 2 years on first run) |
-| **Wise comparisons** | `wise.com/gateway/v4/comparisons?sendAmount=1000&sourceCurrency=SGD&…` | Today's live mid-market rate (forecast starting point) and provider comparison | Each sync, and on page views (cached 5 min) |
+| **Wise comparisons** | `wise.com/gateway/v4/comparisons?sendAmount=1000&sourceCurrency=SGD|USD&targetCurrency=…&numberOfProviders=3&…` | Today's live mid-market rate (forecast starting point) and provider comparison | Each sync, and on page views (cached 5 min) |
 | **Frankfurter (ECB)** | `api.frankfurter.dev/v1/<start>..<end>?base=USD&symbols=EUR,JPY,GBP,CNY` | "US-dollar strength" signal used by the market model and the Market context card | Each sync (45 days; ~14 months on first run) |
 | **US Treasury yield curve** | `home.treasury.gov/…/daily-treasury-rates.csv/<year>/all?type=daily_treasury_yield_curve…` | US 2-year yield (the market's expected Fed path) for the `macro` model and Market context card. The "2 Yr" column is found by header name, because the columns change between years | Each sync: current year (+ previous year in January; 3 years on first run). Fetched one year at a time with a 40 s timeout: the server is sometimes slow (0.6–19 s) |
 | **FRED Brent crude** | `fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILBRENTEU&cosd=<start>` | Oil price for the `macro` model and Market context card. EIA-sourced, so it runs ~1 week behind | Each sync (60 days; 800 days on first run) |
 | **FRED broad dollar index** | `fred.stlouisfed.org/graph/fredgraph.csv?id=DTWEXBGS&cosd=<start>` | Fed H.10 trade-weighted US dollar index (free stand-in for DXY), `macro` input for SGD → USD only. Weekly release, lag 10 days | Each sync (60 days; 800 days on first run) |
 | **ExchangeRate-API** | `open.er-api.com/v6/latest/SGD` | Independent cross-check of today's rate | Each sync |
-| **Currency-API** | `cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/…/sgd.json` | Independent cross-check of today's rate | Each sync |
+| **Currency-API** | `cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/…/sgd.json` (fallback `latest.currency-api.pages.dev`) | Independent cross-check of today's rate | Each sync |
 | **Fed FOMC calendar page** | `federalreserve.gov/monetarypolicy/fomccalendars.htm` | FOMC decision dates: history and next year's schedule | Each sync |
 | **Fed calendar feed** | `federalreserve.gov/json/calendar.json` | FOMC meeting dates (fallback, back to 2017) | Each sync |
 | **BLS release calendar** | `bls.gov/schedule/<year>/home.htm` (two years back, one ahead) | US CPI and Employment Situation (jobs report) release days, shown as events (no band widening) | Each sync |
@@ -180,12 +180,13 @@ sequenceDiagram
 flowchart TD
     L["🔒 Take sync lock<br/>expires after 5 min"] --> M
     M["1 · Market data<br/>ECB dollar-strength series<br/>+ cross-check rates"] --> MA
-    MA["1a · Macro factors<br/>Treasury 2y yield + FRED Brent<br/>+ CBSL rates and tables → market_data<br/>scraper status → source_health"] --> EV
-    EV["1b · Policy events<br/>Fed + CBSL calendars → events<br/>+ decision outcomes from statements<br/>scraper status → source_health"] --> I
+    MA["1a · Macro factors<br/>Treasury 2y yield + FRED Brent + broad dollar index<br/>+ CBSL rates and tables → market_data<br/>scraper status → source_health"] --> EV
+    EV["1b · Policy events<br/>Fed + CBSL + BLS calendars → events<br/>+ decision outcomes from statements<br/>scraper status → source_health"] --> I
     I["2 · Wise rates, per pair<br/>SGD→LKR, SGD→USD, USD→LKR<br/>official daily history<br/>+ today's live quote and providers"] --> E
     E["3 · Score past forecasts<br/>every prediction whose day now has<br/>an official rate → prediction_errors"] --> R
     R["4 · Fill gaps<br/>replay any missed day in the last 365<br/>using only data known on that day<br/>(40 s budget, resumes next run)"] --> F
-    F["5 · Learn + forecast today<br/>legs first: SGD→USD, USD→LKR, then SGD→LKR<br/>weights, bias, range from last 180 days of misses<br/>→ 31-day forecast from today's live rate"] --> H
+    F["5 · Learn + forecast today<br/>legs first: SGD→USD, USD→LKR, then SGD→LKR<br/>weights, bias, range from last 180 days of misses<br/>→ 31-day forecast from today's live rate"] --> VB
+    VB["5b · Version backtest<br/>once per MODEL_VERSION, only if the replay<br/>is complete → model_versions"] --> H
     H["6 · Housekeeping<br/>prune old predictions & quotes<br/>log result in sync_runs"] --> U["🔓 Release lock"]
 ```
 
@@ -194,11 +195,11 @@ flowchart TD
 | **1. Market data** | Frankfurter, ExchangeRate-API, Currency-API | `market_data` | USD strength = average of log(EUR, JPY, GBP, CNY per USD); rises when the dollar strengthens |
 | **1a. Macro factors** | Treasury yield CSV, FRED Brent + broad dollar index CSV, CBSL rate lookup + statistical .xlsx | `market_data` (`ust2y`, `brent`, `usd_broad`, `lk_*`), `source_health` (`treasury`, `fred-brent`, `fred-usd-broad`, `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices`) | Same failure model as 1b (shared `recordHealth` helper). A missing factor just means the model using it falls back to "no change" |
 | **1b. Policy events** | Fed page + JSON, CBSL review list + latest PDF, CBSL RSS, BLS release schedule (US CPI, jobs report); then each past event's own statement (FOMC HTML, CBSL review PDF) | `events` (incl. `outcome`), `source_health` (incl. `outcomes`) | Each source fails on its own: a failure is logged and recorded in `source_health`, never fails the sync. Outcomes: past events with no outcome (last ~800 days), newest first, at most 32 statements per run |
-| **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes` | History rows are `source='wise'` (official). Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it |
+| **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes`, `source_health` (`wise-history:*`, `wise-live:*`, `cross-rate`) | History rows are `source='wise'` (official). Points are validated first (`lib/sources/validate.ts`); rejects are dropped and reported. Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it. Then SGD → LKR is checked against SGD → USD × USD → LKR (limit 0.5%) |
 | **3. Score** | `predictions` + official `rates_history` | `prediction_errors` | For each forecast: predicted, actual, delta = actual − predicted, % miss. Only official rates count as "actual". One INSERT…SELECT with nested loops disabled (after a big replay the planner otherwise picked a plan that took 13 min instead of 8 s) |
 | **4. Fill gaps** | stored rates, errors | `predictions` | On first deploy this replays 365 days (40 s per run, resumed on the next run until done), so the learner starts with real statistics. Afterwards it only fills days the cron missed |
 | **5. Learn + forecast** | rates, ECB series, macro + CBSL factors, errors, events + outcomes, the legs' forecasts | `model_stats`, `predictions` | 12 models × 31 days ahead, blended with learned weights. Every model except the random walk gets weight 0 until it is statistically better than the random walk in that horizon bucket. Known Fed/CBSL/IMF events widen the 80% range (step 4's replay does the same, using only events public on each day); US CPI/jobs days are shown only. Forecasts are **write-once**: a second run on the same day keeps the first forecast. Promotions/demotions go to `learning_log` |
-| **5b. Version backtest** | everything above, in memory | `model_versions` | Once per `MODEL_VERSION`: replays the deployed code over 365 days (scored on the last 300), compares skill vs the random walk with the previous version (±0.5% = same). Time-boxed (50 s page-triggered, 240 s cron) |
+| **5b. Version backtest** | everything above, in memory | `model_versions` | Once per `MODEL_VERSION`: replays the deployed code over 365 days (scored on the last 300), compares skill vs the random walk with the previous version (±0.5% = same). Runs only when step 4's replay is complete. Time-boxed from the start of the sync (50 s page-triggered, 240 s cron); out of time = nothing stored, retried next run |
 | **6. Housekeeping** | | `sync_runs` | Prunes per-model prediction rows after 550 days (`ensemble` and `naive` are kept forever) and quotes after 60 days, to stay within Neon's free 0.5 GB |
 
 ---
@@ -207,12 +208,12 @@ flowchart TD
 
 | Data | Refreshed | Why this frequency |
 |---|---|---|
-| **Live Wise rate & provider comparison** (Today card, Send 1,000 SGD card) | On page view, cached **5 minutes**; also stored by each sync | The only number that genuinely changes minute to minute. A 5-minute cache keeps it current without calling Wise on every visit (avoids rate limits and blocking) |
+| **Live Wise rate & provider comparison** (Today card, Send 1,000 SGD / USD card) | On page view, cached **5 minutes**; also stored by each sync | The only number that genuinely changes minute to minute. A 5-minute cache keeps it current without calling Wise on every visit (avoids rate limits and blocking) |
 | **Official daily rates** (past days in the month view) | Each sync (≈ daily) | Wise publishes one official point per day. Re-fetching 3 months also picks up any corrections |
 | **ECB dollar-strength series** | Each sync | ECB publishes once per business day |
 | **Cross-check rates** | Each sync | Sanity check of Wise; daily is plenty |
-| **Macro factors** (2y yield, Brent) | Each sync | Both publish once per business day; Brent arrives ~1 week late from FRED |
-| **CBSL series** (fixings, policy rate, T-bill, remittances, tourism) | Each sync | Fixings are daily; the monthly tables come out 1–2 months late, so they are lagged 45–60 days |
+| **Macro factors** (2y yield, Brent, broad dollar index) | Each sync | Yield and Brent publish once per business day (Brent arrives ~1 week late from FRED); the broad dollar index is weekly |
+| **CBSL series** (fixings, policy rate, T-bill, remittances, tourism, Colombo CPI) | Each sync | Fixings are daily; the monthly tables come out 1–2 months late, so they are lagged 45–60 days |
 | **Policy events + source health** | Each sync | Schedules change rarely; a daily read catches a new date within a day |
 | **Decision outcomes** (cut / hold / hike) | Each sync, only for past events not yet classified | A statement never changes once published, so each is read once |
 | **Prediction deltas** (`prediction_errors`) | Each sync | A forecast can only be scored once its day's official rate exists, i.e. once a day |
@@ -310,7 +311,7 @@ is **262.0**. The next sync writes:
 |---|---|---|---|---|---|---|---|
 | ensemble | 2026-11-29 | 2026-11-30 | 1 | 262.5 | 262.0 | −0.5 | +0.19% |
 
-The same row is written for each of the 11 models and for `blend` / `blend_bc`. Over the 180-day window:
+The same row is written for each of the 12 models and for `blend` / `blend_bc`. Over the 180-day window:
 
 - A model only gets weight once it has **proven** it beats the random walk (see "gate" below). Among the
   models that pass, smaller average misses get more weight (weight ∝ 1 / miss⁴, shrunk toward average when
@@ -338,7 +339,7 @@ Horizon buckets are learned separately: **1 day, 2–3, 4–7, 8–14, 15–31 d
 tomorrow and poor for next month.
 
 **No look-ahead.** A forecast made on day *t* only ever uses data known on day *t*. Macro factors are cut at
-*t* − lag (1 day for yields and CBSL fixings, 9 for Brent, 45–60 for CBSL monthly tables) in both the live run
+*t* − lag (1 day for yields and CBSL fixings, 9 for Brent, 10 for the broad dollar index, 45–60 for CBSL monthly tables) in both the live run
 and the replay. This holds for live runs and for the 365-day replay, so backtest numbers are honest.
 
 ---
@@ -389,8 +390,8 @@ so the LKR range widens from 21 Nov. FOMC days showed no extra move for LKR (ran
 1.2× for SGD → USD.
 
 The **Policy events** card lists upcoming and recent events with their learned effect and decision badge, and
-flags any event scraper that has failed or not succeeded in 3 days (`source_health`). Treasury and FRED
-health is shown in the Market context card instead. The same data is in `/api/dashboard` under
+flags any event scraper that has failed or not succeeded in 3 days (`source_health`). Treasury, FRED, CBSL
+data and Wise history health is shown in the Market context card instead. The same data is in `/api/dashboard` under
 `.events` (`upcoming`, `recent`, `health`; each event has `outcome`), each currency's learned ratios are in
 `.currencies[].stats.events`, and the learned post-announcement drifts in `.currencies[].stats.news`.
 
@@ -451,6 +452,7 @@ erDiagram
         float delta
         float pct_error
         float log_error
+        timestamptz evaluated_at
     }
     model_stats {
         text currency PK
@@ -465,6 +467,7 @@ erDiagram
         text title
         text url
         text outcome "cut, hold, hike, sla, board, other, unclear"
+        timestamptz updated_at
     }
     source_health {
         text source PK
@@ -481,6 +484,7 @@ erDiagram
         jsonb backtest "skill and coverage per pair and bucket"
         text previous
         jsonb comparison "better, same or worse"
+        timestamptz created_at
     }
     learning_log {
         text currency PK
@@ -518,7 +522,7 @@ erDiagram
 | Route | Method | Auth | Description |
 |---|---|---|---|
 | `/` | GET | none | The dashboard |
-| `/api/dashboard` | GET | none | Everything on the page as JSON (CDN-cached 2 min), including `.events` (upcoming, recent, source health) and `.macro` (latest 2y yield / Brent with 30-day change) |
+| `/api/dashboard` | GET | none | Everything on the page as JSON (CDN-cached 2 min), including `.events` (upcoming, recent, source health) and `.macro` (latest 2y yield, Brent, broad dollar index and CBSL series, with the change over 30 days, or a year for remittances and tourism) |
 | `/api/cron/sync` | GET | `Authorization: Bearer $CRON_SECRET` | Runs a sync; returns `{ status, runDate, log, ms }`. Returns 401 without the secret. On a deployment it refuses to run (500) if `CRON_SECRET` isn't set, instead of being open to anyone |
 
 ---
@@ -539,8 +543,9 @@ lib/
   config.ts                 Currencies, horizons, windows, timezone, macro factors + lags
   dates.ts, format.ts       Date math (YYYY-MM-DD strings), number formatting
   db.ts                     Postgres client + schema
-  sources/                  wise.ts, market.ts, macro.ts (Treasury yield, FRED Brent), events.ts (Fed/CBSL
-                            calendars), srilanka.ts + srilanka-xlsx.ts (CBSL rates and tables), pdf.ts, http.ts
+  sources/                  wise.ts, market.ts, macro.ts (Treasury yield, FRED Brent + broad dollar index),
+                            events.ts (Fed/CBSL/BLS calendars), srilanka.ts + srilanka-xlsx.ts (CBSL rates and
+                            tables), validate.ts (Wise data checks), pdf.ts, http.ts
   predict/                  series.ts, calendar.ts (non-trading days), models.ts, learning.ts, events.ts,
                             replay.ts (one forecast day, shared), backtest.ts (version backtest),
                             news.ts, engine.ts (pure, no I/O)
@@ -550,7 +555,7 @@ lib/
 scripts/sync.ts             Run a sync from the command line
 scripts/backtest.ts         npm run backtest: in-memory 365-day backtest of the current code (writes nothing)
 vercel.json                 Region sin1 + daily cron
-tests/                      Unit tests (node:test via tsx): parsers, dates, PDF text, events, news, cbsl_gap, validation, performance
+tests/                      Unit tests (node:test via tsx): parsers, dates, PDF text, events, news, cbsl_gap, validation, performance, backtest
 docs/                       ARCHITECTURE.md, CONTEXT.md
 AGENTS.md, CLAUDE.md, .claude/   Guidance for AI coding agents (rules, skills, lint hook)
 ```
@@ -601,7 +606,7 @@ npm run dev       # http://localhost:3000
 | `npm run sync` | One full sync against `.env.local`'s database |
 | `npm run dev` / `npm run build` / `npm start` | Next.js dev / production build / production server |
 | `npm run lint`, `npx tsc --noEmit` | Lint, typecheck |
-| `npm test` | Unit tests (59). Inside the Claude Code sandbox use `node --import tsx --test tests/*.test.ts`, because the `tsx` CLI needs an IPC socket the sandbox blocks |
+| `npm test` | Unit tests (88). Inside the Claude Code sandbox use `node --import tsx --test tests/*.test.ts`, because the `tsx` CLI needs an IPC socket the sandbox blocks |
 | `REPLAY_BUDGET_MS=100000000 npm run sync` | Full 365-day replay in one run (about 1 minute locally) |
 
 ---
@@ -611,8 +616,8 @@ npm run dev       # http://localhost:3000
 | Service | Free limit (approx.) | RateCast usage |
 |---|---|---|
 | Vercel Hobby | Daily crons only; functions up to 300 s | 1 cron/day; sync ~10–20 s (first run: 40 s replay slices) |
-| Neon Free | 0.5 GB storage, monthly compute cap, auto-suspend when idle | ~1,300 forecast rows/day (3 pairs × 14 rows × 31 days); ~1 year kept ≈ 470k rows + their scores, ~150 MB; DB idle most of the day |
-| Wise / ECB / Fed / CBSL / Treasury / FRED / other APIs | Public, keyless | ~25 calls per sync (incl. one CBSL PDF and three CBSL .xlsx) + at most 3 live Wise calls per 5 min while people are visiting |
+| Neon Free | 0.5 GB storage, monthly compute cap, auto-suspend when idle | ~1,400 forecast rows/day (3 pairs × 15 rows (12 models + `blend`, `blend_bc`, `ensemble`) × 31 days); a 365-day replay is ≈ 470k rows + their scores, ~150 MB; per-model rows pruned after 550 days; DB idle most of the day |
+| Wise / ECB / Fed / CBSL / Treasury / FRED / other APIs | Public, keyless | ~33 calls per sync (incl. one CBSL PDF and five CBSL .xlsx downloads), plus up to 32 statement reads while outcomes are pending, + at most 3 live Wise calls per 5 min while people are visiting |
 
 ---
 

@@ -36,7 +36,8 @@ services, no second cron. Events only widen the band. They never move the point 
    ```
    Spot-check a few dates against the source by eye.
 7. **Decisions.** If the source announces *decisions* (a rate cut, an approval), add an exported pure classifier
-   (`classifyX(text): string | null`) next to `classifyFomc`/`classifyCbsl`, and extend `fetchOutcomes()` to
+   (`classifyX(text): string | null`) next to `classifyFomc`/`classifyCbsl`, add the kind to `OUTCOME_KINDS` in
+   `lib/predict/events.ts` (only those kinds are sent for classification), and extend `fetchOutcomes()` to
    read **the event's own** statement (never the one that announced the date). Outcome values are stored data:
    never rename them. Test the phrase list on every past statement, and watch for substring traps
    ("increases" contains "eases"). Unparsable → `unclear`. New `kind:outcome` categories feed the `news`

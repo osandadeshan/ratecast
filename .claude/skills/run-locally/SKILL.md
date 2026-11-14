@@ -17,7 +17,8 @@ description: Start RateCast locally (Postgres in Docker, sync, Next server) and 
    `forecast ... tomorrow ≈ ...` lines.
 3. **Serve.** For quick iteration, run `npm run dev` in the background. To check production behaviour (Cache
    Components, prerendering), use `npm run build && PORT=3123 npx next start` in the background.
-4. **Check data.** `curl -s localhost:3123/api/dashboard | jq '.lastSync, (.currencies[] | {target, live: .live.midRate, tomorrow: .tomorrow.predicted})'`
+4. **Check data.** (`npm run dev` serves on port 3000; the commands below use the `next start` port 3123.)
+   `curl -s localhost:3123/api/dashboard | jq '.lastSync, (.currencies[] | {target, live: .live.midRate, tomorrow: .tomorrow.predicted})'`
 5. **Check visually.** There is no Chrome, so use Brave + Playwright with real device emulation. Headless
    `--window-size` can't go below ~500px, so don't trust it for mobile:
    ```js
@@ -31,5 +32,5 @@ description: Start RateCast locally (Postgres in Docker, sync, Next server) and 
    await b.close();
    ```
    Also take a 1280px-wide screenshot and look at both images. Check the **Policy events** card (upcoming
-   FOMC/CBSL dates, no red source warnings) and the dotted event markers on the chart.
+   FOMC/CBSL dates and the display-only US CPI/jobs days, no red source warnings) and the dotted event markers on the chart.
 6. Stop the server afterwards (`pkill -f "next start"`). Leave the DB container running.

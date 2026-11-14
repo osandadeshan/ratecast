@@ -6,16 +6,16 @@ paths:
   - "lib/config.ts"
 ---
 
-# Macro factor rules (Treasury yields, Brent)
+# Macro factor rules (Treasury yields, Brent, broad dollar index, CBSL data)
 
 - Same constraints as everything else: keyless, free, inside the single daily sync, fetched through
   `lib/sources/http.ts`, and fully automatic (never hand-entered values).
 - Sources (`lib/sources/macro.ts`, ingested by `ingestMacro` in `lib/sync.ts`, health in `source_health`):
   | series | source | parse | fragility |
   |---|---|---|---|
-  | `ust2y` | home.treasury.gov daily par yield curve CSV, one per year | find the `"2 Yr"` column **by header name** (columns differ by year, e.g. 2025 added "1.5 Month"); dates `MM/DD/YYYY` | Slow and erratic: 0.6–20 s per CSV. Fetch years **sequentially**, 40 s timeout. First run fetches 3 years, later runs the current year (plus the last one in January) |
-  | `brent` | FRED `fredgraph.csv?id=DCOILBRENTEU` | `observation_date,VALUE`, `.` = missing | EIA-sourced, so it **lags ~1 week** (Nov 3 was latest on Nov 11). First run 800 days, later 60 |
-  | `usd_broad` | FRED `fredgraph.csv?id=DTWEXBGS` (Fed H.10 broad trade-weighted dollar index), health `fred-usd-broad` | same FRED CSV parser | **Weekly** release (Mon 16:15 ET) with data to the previous Friday: Nov 6 was latest on Nov 13/14. lag 10. SGD→USD only (`pairs: ["USD"]`) |
+  | `ust2y` | home.treasury.gov daily par yield curve CSV, one per year, health `treasury` | find the `"2 Yr"` column **by header name** (columns differ by year, e.g. 2025 added "1.5 Month"); dates `MM/DD/YYYY` | Slow and erratic: 0.6–20 s per CSV. Fetch years **sequentially**, 40 s timeout. First run fetches 3 years, later runs the current year (plus the last one in January) |
+  | `brent` | FRED `fredgraph.csv?id=DCOILBRENTEU`, health `fred-brent` | `observation_date,VALUE`, `.` = missing | EIA-sourced, so it **lags ~1 week** (Nov 3 was latest on Nov 11). First run 800 days, later 60 |
+  | `usd_broad` | FRED `fredgraph.csv?id=DTWEXBGS` (Fed H.10 broad trade-weighted dollar index), health `fred-usd-broad` | same FRED CSV parser | **Weekly** release (Mon 16:15 ET) with data to the previous Friday: Nov 6 was latest on Nov 13/14. lag 10. SGD→USD only (`pairs: ["USD"]`). First run 800 days, later 60 |
 - `MACRO_FACTORS` (`lib/config.ts`) is the single list: `series`, `label`, `lagDays`, `transform`
   (`diff` for yields in pp, `log` for prices). Series names are data, like model names: never rename.
 - Optional `pairs`: the factor only feeds the `macro` model for those pairs (default: all).
@@ -30,6 +30,7 @@ paths:
 
 ## Sri Lanka series (CBSL, `lib/sources/srilanka.ts`)
 - `SRI_LANKA_SERIES` lists each series with its fetcher and `source_health` key. Series names (`lk_*`) are data.
+  A series with < 20 stored points fetches 800 days, otherwise 120.
   | series | source | lag (`LANKA_FACTORS`) |
   |---|---|---|
   | `lk_usd_spot`, `lk_sgd_ind` | CBSL exchange-rate lookup (HTML form **POST**, table back to 2006), health `cbsl-fx` | 1 day |
@@ -41,4 +42,4 @@ paths:
 - Not usable yet: weekly reserves and CBSL's net USD purchases. They're only in a weekly PDF whose text the
   dependency-free PDF reader can't extract.
 - Models on these series: `lanka` (ridge on all `LANKA_FACTORS`) and `cbsl_gap` (Wise moves toward CBSL's fixing).
-  Both are gated like every model and only run for LKR pairs.
+  Both are gated like every model. They run for every pair but equal `naive` for SGD→USD (the UI hides them there).

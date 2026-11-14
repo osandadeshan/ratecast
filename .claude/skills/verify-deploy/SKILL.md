@@ -18,22 +18,26 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    `CRON_SECRET` is set). Don't call it with the secret unless the user provides it and asks for a manual run.
 4. **Policy events.** The sync log (`.lastSync.message`) must have an `events:` line with a count per source. Then:
    `curl -s $URL/api/dashboard | jq '.events | {upcoming: [.upcoming[] | "\(.date) \(.short)"], health: [.health[] | {source, ok, error, note}]}'`
-   - Every `health[].ok` should be `true`, and `upcoming` should list the next FOMC/CBSL dates.
+   - Every `health[].ok` should be `true`, and `upcoming` should list the next FOMC/CBSL dates and the
+     BLS CPI/jobs days (`CPI`, `Jobs`; display-only, they don't widen the band).
    - `ok: false` with an `error` means a scraper broke or the site blocks Vercel. Reproduce from the shell with a
      generic UA (URLs are in `.claude/rules/events.md`). If it works locally but not on Vercel, it's an IP block
      (report it, don't work around it with paid proxies). If the layout changed, fix the parse function in
      `lib/sources/events.ts`. Forecasts still work meanwhile: that event kind just stops widening the band.
    - A `note` (e.g. "next review date not announced yet") is expected around year end, not a failure.
-5. **Macro factors.** The log must have `ust2y: N days` and `brent: N days` lines. Then:
-   `curl -s $URL/api/dashboard | jq '.macro, [.events.health[] | select(.source=="treasury" or .source=="fred-brent")]'`
-   - `.macro` should list `ust2y` (date = last US business day) and `brent` (about a week old, which is normal).
+5. **Macro factors.** The log must have `ust2y: N points (latest …)`, `brent: N points …` and
+   `usd_broad: N points …` lines. Then:
+   `curl -s $URL/api/dashboard | jq '.macro, [.events.health[] | select(.source=="treasury" or .source=="fred-brent" or .source=="fred-usd-broad")]'`
+   - `.macro` should list `ust2y` (date = last US business day), `brent` (about a week old, which is normal) and
+     `usd_broad` (weekly release, up to ~10 days old).
    - The first sync takes ~1 min longer: it downloads 3 yearly Treasury CSVs, one at a time, and home.treasury.gov
      can take ~20 s each. `treasury` failing with a timeout once is OK; it should be ok after the next run.
    - Every model except the random walk shows "not used" in the weights table until it passes the significance
-     gate (t < −2.6 vs naive). As of 2026-11-13 none has, so the forecast equals today's rate. That's by design.
+     gate (t < −2.6 vs naive). As of 2026-11-14 none has (and the bias correction is off in every bucket), so the forecast equals today's rate. That's by design.
    - **Sri Lanka series.** The log must have `lk_usd_spot`, `lk_sgd_ind`, `lk_opr`, `lk_tbill3m`, `lk_remit`,
-     `lk_tourism` lines, and `source_health` rows `cbsl-fx`, `cbsl-rates`, `cbsl-external` should be ok. `.macro`
-     on the dashboard lists them; monthly series are 1–2 months old, which is normal.
+     `lk_tourism`, `lk_ccpi_yoy` lines, and `source_health` rows `cbsl-fx`, `cbsl-rates`, `cbsl-external`,
+     `cbsl-prices` should be ok. `.macro` on the dashboard lists them; monthly series are 1–2 months old, which
+     is normal. `lk_ccpi_yoy` (Colombo CPI) is context only, not a model input.
    - **Three pairs.** `.currencies` has `LKR`, `USD` and `USDLKR`. The first sync replays 365 days in 40 s
      slices, so `.lastSync.status` is `partial` for the first ~2 runs.
 6. **Decision outcomes.** After the first sync, past events should carry outcomes:

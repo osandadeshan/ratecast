@@ -19,7 +19,8 @@ official rate may deserve its own model, like `cbsl_gap`.
    year. FRED can't be reached with `curl` from the local sandbox. Use WebFetch to look at it; `npm run sync`
    (Node fetch) works.
 2. **Parser** in `lib/sources/macro.ts`: a pure `parseX(text): Point[]` plus `fetchX()` using `getText` (generous
-   timeout for slow hosts). Find columns by header name, skip blanks and `.`, and throw if 0 points.
+   timeout for slow hosts). Find columns by header name, skip blanks and `.`, and make `fetchX()` throw if
+   0 points.
 3. **Config**: add `{ series, label, lagDays, transform }` to `MACRO_FACTORS` in `lib/config.ts`. Add
    `pairs: [...]` to limit it to the pairs it helped in the backtest (e.g. `usd_broad`, FRED DTWEXBGS, lag 10,
    is SGD→USD only). The broad dollar index already covers "DXY": don't add a second dollar index.
@@ -28,9 +29,10 @@ official rate may deserve its own model, like `cbsl_gap`.
    - `transform`: `diff` for rates/yields (pp), `log` for prices/indices.
    - The series name is stored in `market_data`: never rename it later.
 4. **Ingest**: add a job to `ingestMacro` in `lib/sync.ts` (first run ~800 days, then ~60). It already records
-   `source_health` through `recordHealth`. Add the source label to `SOURCE_LABEL` in `lib/dashboard.ts`.
-   `.macro` on the dashboard picks the series up from `MACRO_FACTORS` automatically.
-5. **Run**: `npx tsc --noEmit && npm run lint`, then `npm run sync`. Expect a `<series>: N days (latest …)` line
+   `source_health` through `recordHealth`. In `lib/dashboard.ts`, add the source label to `SOURCE_LABEL`, a row
+   to `SERIES_CATALOG` (data freshness, with `maxAgeDays`) and, if the level isn't a percentage, a `FORMAT`
+   entry. `.macro` on the dashboard picks the series up from `MACRO_FACTORS` automatically.
+5. **Run**: `npx tsc --noEmit && npm run lint`, then `npm run sync`. Expect a `<series>: N points (latest …)` line
    and `SELECT * FROM source_health`.
 6. **Backtest** with the "Shadow / new model" section of the backtest skill: snapshot without the new factor
    (comment it out of `MACRO_FACTORS`), run with it, compare the ensemble per bucket, and check `macro` vs `naive`.

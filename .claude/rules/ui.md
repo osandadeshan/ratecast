@@ -24,14 +24,16 @@ paths:
   `cbsl_gap`: LKR + USDLKR; `cross`: LKR). Add new pair-specific models there. Gated models show "not used".
 - Sri Lanka series in Market context come from `SRI_LANKA_META` (`lib/config.ts`) via `lib/dashboard.ts`.
 - Copy is plain and honest. Never imply guaranteed predictions. Keep the "not financial advice" footer.
-- `PerformanceCard` (after the chart) and `SourcesCard` (after Learning) read `c.performance`, `c.daily`,
-  `c.outlook`, `c.model`, `data.hardest`, `data.freshness`, `data.notIntegrated`. Every error figure sits next
+- `PerformanceCard` (after the chart) reads `c.performance`, `c.daily`, `c.outlook`, `c.model` and `data.hardest`.
+  `SourcesCard` (last, after `VersionsCard`) reads `data.freshness`, `data.notIntegrated` and `data.events.health`. Every error figure sits next
   to the random walk's on the same dates. Bias, trend and outlook show a verdict only when it passes the
-  test in `lib/performance.ts`, otherwise "none"/"no clear change"/"no clear direction". Delta wording is
+  test in `lib/performance.ts`, otherwise "none detected"/"no clear change"/"no clear direction". Delta wording is
   predicted − actual ("too high" / "too low").
-- `VersionsCard` (before Data sources) reads `data.versions` (latest version's backtest per pair + comparison) and
+- `VersionsCard` (after Learning, before Data sources) reads `data.versions` (latest version's backtest per pair + comparison) and
   `data.learningLog`. Skill < 1 = better than the random walk; always show the random walk's error beside it.
 - Policy events card: kinds with `widens: false` in `EVENT_KINDS` (US CPI, jobs report) say "shown only" and
   never "range widened". `lib/predict/events.ts` is pure, so the client component may import `EVENT_KINDS`.
+- Health rows of `MACRO_SOURCES` (`DashboardView.tsx`: Treasury, FRED, CBSL data, Wise history) show in Market
+  context; the other `source_health` rows show in the Policy events card.
 - Market context formats: `FORMAT` in `lib/dashboard.ts` (`pct` default, `usd`, `lkr`, `usdmn`, `index` for the
   broad dollar index).

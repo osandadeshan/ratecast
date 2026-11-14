@@ -115,7 +115,7 @@ results below, which use the current 365/300-day setup):
 - Fully weighted (~15%), it worsened the LKR ensemble: 15–31d 0.3982→0.4024, 8–14d 0.2698→0.2715.
 - In shadow with promotion off, the ensemble was identical in all 8 buckets.
 - With a row-count promotion rule (n ≥ 60, < naive), LKR 15–31d went to 0.4032, because it promoted on overlapping forecasts.
-- Final rule (≥ 30 distinct dates, < 0.98 × naive): LKR 15–31d 0.3982→0.3977 and 8–14d 0.2698→0.2704 (14 forecasts),
+- Final rule at the time (≥ 30 distinct dates, < 0.98 × naive; since replaced by the paired t-test, t < −2.6): LKR 15–31d 0.3982→0.3977 and 8–14d 0.2698→0.2704 (14 forecasts),
   everything else identical. That technically breaks "no worse in every bucket" by 0.0006 pp. The owner accepted
   this on 2026-11-11 and kept auto-promotion on (see `docs/CONTEXT.md`). Don't re-raise it or tune the thresholds.
 

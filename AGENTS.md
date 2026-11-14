@@ -36,7 +36,8 @@ results, limitations).
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
 
-`tests/` covers the pure parts (parsers, dates, PDF text, events, news, `cbsl_gap`). Add a test for every new
+`tests/` covers the pure parts (parsers, dates, PDF text, Wise validation and comparison, events, news, `cbsl_gap`,
+performance metrics, the version backtest). Add a test for every new
 parser or model. Verify changes with tests + typecheck + lint + build, `npm run sync`, and by loading the page
 or `GET /api/dashboard`. For model changes, run the backtest (`.claude/skills/backtest/SKILL.md`).
 
@@ -46,7 +47,8 @@ app/page.tsx                  Server page: Suspense + connection(); after() trig
 app/components/               Client UI (DashboardView = whole page, MonthChart = Recharts)
 app/api/cron/sync/route.ts    Daily Vercel Cron target (Bearer CRON_SECRET)
 app/api/dashboard/route.ts    Read-only JSON of everything on the page
-lib/config.ts                 Currencies, horizons, windows, timezone, MACRO_FACTORS (single source of truth)
+lib/config.ts                 Pairs, horizons, windows, budgets, timezone, MODEL_VERSION, MACRO_FACTORS, LANKA_FACTORS,
+                              SRI_LANKA_META (single source of truth)
 lib/dates.ts                  YYYY-MM-DD string date math (UTC-based)
 lib/db.ts                     postgres.js client + idempotent CREATE TABLE IF NOT EXISTS schema
 lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks),
@@ -55,7 +57,8 @@ lib/sources/                  Wise (history, comparisons), market (ECB basket, c
                               3m T-bill, remittances, tourism, Colombo CPI; dependency-free .xlsx reader),
                               events (Fed FOMC page + JSON, CBSL review list + PDF, CBSL RSS, BLS schedule,
                               decision outcomes read from each FOMC statement / CBSL review PDF),
-                              pdf (dependency-free PDF text via node:zlib), http (getJSON/getText/getBytes)
+                              pdf (dependency-free PDF text via node:zlib), validate (Wise sanity checks, cross-rate),
+                              http (getJSON/getText/getBytes)
 lib/predict/                  series helpers, calendar (detects non-trading weekdays, e.g. Sundays),
                               models (incl. `macro`, `lanka`, `cross`, `cbsl_gap`, `arima` + SHADOW_MODELS), learning (weights/bias/
                               sigma/shadow promotion), events (event-day
@@ -113,8 +116,9 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
      `press_YYYYMMDD` of that event. Never classify from a different statement's PDF. An outcome counts only
      from `event_date + 1` (CBSL publishes after the 09:30 SGT sync). Once set, the upsert never overwrites it.
 7. **Macro factors are lagged, and new models start in shadow.** (`lib/config.ts`, `lib/predict/models.ts`)
-   - Each factor in `MACRO_FACTORS` has a `lagDays` (`ust2y` 1, `brent` 9: FRED's Brent runs ~1 week late).
-     Replay and live both see only `date <= anchor - lagDays` (`factorsAt` in `lib/sync.ts`). Don't use a
+   - Each factor in `MACRO_FACTORS` has a `lagDays` (`ust2y` 1, `brent` 9: FRED's Brent runs ~1 week late,
+     `usd_broad` 10: weekly H.10 release). Replay and live both see only `date <= anchor - lagDays` (`factorsAt`
+     in `lib/predict/replay.ts`, called by `forecastDay`). Don't use a
      factor value the 09:30 SGT sync couldn't have had.
    - `LANKA_FACTORS` (CBSL series) follow the same rule: daily fixings lag 1 day, policy rate / T-bill 60,
      remittances / tourism 45 (monthly tables are published 1–2 months late).

@@ -18,12 +18,12 @@ paths:
     signal). Don't remove this gate.
   - 80% band: half-width = `q80 × √(h / meanH)`, where `q80` is the empirical 80th percentile of the bucket's
     horizon-normalised |ensemble log error| (n ≥ 30), recency-weighted with half-life `BAND_HALF_LIFE_DAYS` = 30
-    (2026-11-14: USD→LKR coverage 67.2 → 70.7%, SGD→USD 83.5 → 81.6%, SGD→LKR 80.2 → 79.1%; 15 days over-reacted). Fallback: RMS of errors, else daily vol × √h. (The old
+    (2026-11-14: USD→LKR coverage 67.2 → 70.7%, SGD→USD 83.5 → 81.6%, SGD→LKR 80.2 → 79.1%; 15 days over-reacted). Fallback: `Z80` × RMS of errors (n ≥ 10), else `Z80` × daily vol (60 days) × √h. (The old
     RMS band covered 92–94% at 2–14 days and was one width for a whole bucket.)
   - Non-trading weekdays (`calendar.ts`, detected: Sunday's Wise point repeats Saturday's ~98% of the time):
     forecasts don't move across them and their target dates are excluded from learning and accuracy.
-  - Policy events (`events.ts`) add variance: band sigma = `sqrt(sigma² + Σ (ratio−1)·base2)` over known events
-    whose move falls in (anchor, target]. Events **never change the point forecast**. Details are in `events.md`.
+  - Policy events (`events.ts`) add variance: band half-width = `sqrt(half² + Z80² · Σ (ratio−1)·base2)` over known
+    band-widening events whose move falls in (anchor, target] (`eventExtraVar`, applied in `engine.ts`). Events **never change the point forecast**. Details are in `events.md`.
 - **Shadow mode** (`SHADOW_MODELS` in `models.ts`, gate in `learning.ts`):
   - Every new model built on **external data** starts in `SHADOW_MODELS`. It runs and is scored daily, but it
     gets weight 0 and is left out of the pooled MAE (the shrinkage target), so the blend is identical to
@@ -33,7 +33,7 @@ paths:
   - Promotion is automatic and per bucket. It needs **≥ 30 distinct target dates** in the window **and** a paired
     t-test on per-date mean |error| vs `naive` with t < −2.6 (n_eff = dates / bucket mean horizon, because
     neighbouring forecasts overlap; 2.6 = Bonferroni for ~10 candidates per bucket. Plain t < −2 promoted noise
-    for USD→LKR in May 2026 and made 2–7d 5% worse). Stored as `BucketStats.promoted`; the UI shows "shadow".
+    for USD→LKR in May 2026 and made 2–7d 5% worse). Stored as `BucketStats.promoted`; the UI shows "not used" for a model that isn't promoted.
   - Count distinct dates, not rows. Long-horizon forecasts overlap: 60 rows at 15–31 days arrive within ~4 days
     and share a handful of targets. A row-count rule promoted `macro` on noise and worsened LKR 15–31d.
   - **Never hand-promote, and never remove a model from shadow to make it count.** Don't loosen the thresholds
@@ -46,7 +46,7 @@ paths:
 - `news` model (shadow): `naive` plus the learned post-announcement drift (`news.ts`). For the 5 days after
   E+1 of a classified decision, it adds that category's shrunk mean drift (shrink 8 pseudo-events at 0,
   ≥ 3 events, 730-day lookback). It only uses outcomes from E+1 on. On all other days it **equals `naive`**
-  (~89% of forecasts in the 2026-11-11 replay), so its overall MAE can only beat naive by 2% if the drift is
+  (~89% of forecasts in the 2026-11-11 replay), so it can only pass the paired t-test vs naive if the drift is
   real and large. That's the intended bar, so don't special-case its promotion. Details are in `events.md`.
 - `lanka` model (shadow, LKR pairs only): the same ridge factor model on `LANKA_FACTORS` (`lib/config.ts`):
   gap between CBSL's official fixing and the Wise rate, CBSL's 5-day USD/LKR move, policy rate and 3m T-bill

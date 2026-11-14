@@ -10,8 +10,10 @@
   needed. There is no `.claude/hooks/` dir; hooks live in `settings.json`.
 - **Attribution is off** in `.claude/settings.json` (`attribution.commit`/`pr` = ""). Keep it that way.
 - **Path-scoped rules** in `.claude/rules/` load when you touch matching files:
-  `nextjs.md` (app/), `database.md` (db, sync, dashboard), `forecasting.md` (lib/predict), `ui.md` (components, css),
-  `events.md` (lib/sources/events.ts, lib/sources/pdf.ts, lib/predict/events.ts), `macro.md` (lib/sources/macro.ts, lib/sources/srilanka.ts, lib/sources/srilanka-xlsx.ts, lib/config.ts).
+  `nextjs.md` (app/, next.config.ts), `database.md` (lib/db.ts, lib/sync.ts, lib/dashboard.ts, scripts/),
+  `forecasting.md` (lib/predict, lib/sync.ts), `ui.md` (app/components, app/globals.css, app/layout.tsx),
+  `events.md` (lib/sources/events.ts, lib/sources/pdf.ts, lib/predict/events.ts, lib/predict/news.ts, lib/sync.ts),
+  `macro.md` (lib/sources/macro.ts, lib/sources/srilanka.ts, lib/sources/srilanka-xlsx.ts, lib/config.ts).
 - **Project skills** in `.claude/skills/`:
   - `run-locally`: start Postgres, sync, dev server, screenshot check.
   - `backtest`: compare every model to the random walk. For the current code use `npm run backtest`

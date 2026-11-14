@@ -59,7 +59,8 @@ must earn weight through the existing learner and the backtest.
 | 1 | Automatic FOMC + CBSL calendars, IMF news from CBSL RSS, event-aware 80% band, Policy events card, chart markers | **done 2026-11-11** |
 | 2 | `macro` model: lagged moves in the US 2y yield (Treasury) and Brent (FRED) → ridge regression on pair returns, plus automatic **shadow mode** for unproven models | **done 2026-11-11, in shadow** (failed the backtest; weight 0 until it beats the random walk) |
 | 3 | Decision outcomes (cut/hold/hike) read from each FOMC statement and CBSL review PDF; `news` model = random walk + learned post-announcement drift for 5 days after E+1, in shadow mode | **done 2026-11-11, in shadow** (ensemble unchanged) |
-| 4 | UI panel "what moved the forecast today" | not started |
+| 4 | More sources and candidates: BLS US CPI / jobs days (display-only events), Fed broad dollar index as a `macro` input for SGD→USD, gated `arima` candidate, recency-weighted 80% band, Colombo CPI for context | **done 2026-11-14** (see Backtest results) |
+| 5 | UI panel "what moved the forecast today" | not started |
 
 Polymarket/Kalshi Fed odds were deferred: each contract covers one meeting and lives a few months, so a daily
 series means stitching rolling contracts with short histories, and the US 2-year yield already prices the
@@ -85,15 +86,15 @@ automated yet: no reachable source in the survey above.
 | Ensemble of simple models, weights learned from deltas | FX is near-random; transparent and cheap; learns which model works per horizon |
 | Keep `naive` as a model and show it in the UI | the honest baseline; the learner can fall back to it |
 | Gated bias correction (≤ 7 days, only if proven) | ungated, it doubled long-horizon error in backtests |
-| 90-day no-lookahead replay on first run | the learner starts with real stats instead of an empty table |
-| ECB basket as the "financial situation" signal | free, keyless, daily; LKR has no free macro feed |
+| 365-day no-lookahead replay on first run (`BACKFILL_DAYS`; 90 days until 2026-11-12) | the learner starts with real stats instead of an empty table |
+| ECB basket as the "financial situation" signal | free, keyless, daily; at the time no free LKR macro feed was known (CBSL data was added 2026-11-13) |
 | Wise endpoints called without `wiseFee`/`midMarketRate` params | optional; the response is the same |
 | Policy events widen the band only, never the point | the decision's direction is unknown in advance; prices move within minutes |
 | Event effect learned per kind from 2 years of 2-day moves vs ordinary weekdays, shrunk (k = 6, min 4 events) | data decides which events matter for which pair (e.g. FOMC adds nothing for LKR) |
-| No hand-maintained calendars; scrape Fed/CBSL and track `source_health` | owner requirement (fully automatic); breakage is visible on the page instead of silent |
+| No hand-maintained calendars; scrape Fed/CBSL/BLS and track `source_health` | owner requirement (fully automatic); breakage is visible on the page instead of silent |
 | Own PDF text extraction (`node:zlib`) instead of a PDF library | CBSL PDFs are simple; no new dependency |
-| `macro` uses factor moves lagged past publication (yield 1 day, Brent 9 days), applied identically in replay and live | Wise's UTC-midnight point already contains the last US close; only slow pass-through can add anything, and the backtest must not see data the live run wouldn't have |
-| Unproven models run in **shadow mode** (scored daily, weight 0 until ≥ 30 distinct target dates and ≥ 2% better than naive per bucket) | near-equal MAEs give near-equal weights under the 1/MAE⁴ rule, so a weak model would still take ~15% of the blend; promotion stays automatic (owner requirement) |
+| `macro` uses factor moves lagged past publication (yield 1 day, Brent 9 days, broad dollar index 10 days), applied identically in replay and live | Wise's UTC-midnight point already contains the last US close; only slow pass-through can add anything, and the backtest must not see data the live run wouldn't have |
+| Unproven models run in **shadow mode** (scored daily, weight 0 until ≥ 30 distinct target dates and a paired t-test vs naive with t < −2.6 per bucket; until 2026-11-13 the bar was ≥ 2% better than naive). Since 2026-11-13 every model except `naive` is gated this way | near-equal MAEs give near-equal weights under the 1/MAE⁴ rule, so a weak model would still take ~15% of the blend; promotion stays automatic (owner requirement) |
 | Promotion counts distinct target dates, not forecasts | long-horizon forecasts overlap; "≥ 60 forecasts" promoted `macro` on thin evidence and hurt LKR 8–31 days |
 | Automatic promotion stays on despite a +0.0006 pp slip in one bucket (owner, 2026-11-11) | the only alternative is a manual switch, which breaks "fully automatic"; the slip is noise-sized and demotion is automatic too |
 | Polymarket/Kalshi deferred | rolling single-meeting contracts, short histories; the 2y yield carries the same information |
@@ -141,7 +142,7 @@ Worse than the random walk everywhere, so lagged yields and oil don't predict th
 | `macro` fully weighted (~15%) | 0.2698 → 0.2715 | 0.3982 → 0.4024 | 0.2357 → 0.2325 | 0.3089 → 0.3064 | ±0.001 |
 | shadow, promote at ≥ 60 forecasts beating naive | 0.2698 → 0.2731 | 0.3982 → 0.4032 | same | same | identical |
 | shadow, promotion disabled (check) | identical | identical | identical | identical | 0 differing rows |
-| **shipped:** shadow, ≥ 30 distinct dates and < 0.98 × naive | 0.2698 → 0.2704 | 0.3982 → 0.3977 | same | same | identical |
+| **shipped then:** shadow, ≥ 30 distinct dates and < 0.98 × naive (replaced 2026-11-13 by the paired t-test) | 0.2698 → 0.2704 | 0.3982 → 0.3977 | same | same | identical |
 
 Fully weighted, it failed the "no worse in every bucket" rule (LKR worse in 3 buckets). The shipped rule
 changes 89 of ~2,700 ensemble forecasts: LKR 15–31 slightly better, LKR 8–14 slightly worse (+0.0006 pp on
@@ -167,7 +168,8 @@ noise: categories hold 1–11 events, and some make no economic sense (`cbsl_pol
 
 What this means: next-day forecasts match the random walk, which is about as good as FX forecasting gets.
 USD long horizons are currently worse than the random walk, because trend models were rewarded in an earlier
-regime. The learner should shift weight to `naive`/`holt` over time. Watch this.
+regime. The learner should shift weight to `naive`/`holt` over time. Watch this. (Superseded 2026-11-13: every
+model except `naive` is now gated, see below.)
 
 **2026-11-13 · audit fixes, USD→LKR, CBSL data, gating by significance.** New method: 365-day replay, 180-day
 learning window, Sundays excluded from scoring (Wise's Sunday point repeats Saturday's), scored on forecasts made
@@ -277,7 +279,8 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - Weekends: Wise's Sunday point repeats Saturday's. Fixed 2026-11-12: such weekdays are detected (`calendar.ts`),
   forecasts stay flat across them, and they're excluded from learning.
 - "Today" uses Singapore time, while Wise daily points are UTC-midnight snapshots (08:00 SGT).
-- Accuracy stats on the page include the replayed backtest period until real days replace them (~60 days).
+- Accuracy stats on the page include replayed forecasts until live ones replace them (the longest window is 90
+  days). The Performance card shows how many scored forecasts were live vs replayed.
 - **Event scrapers are fragile.** The Fed page, CBSL list and CBSL PDF wording can change. A broken source shows
   a red line in the Policy events card (after 3 days without success) and just stops widening; fix the parser.
 - **CBSL year-end gap.** The year's last review (Nov/Dec) doesn't name the next one (CBSL publishes a yearly
@@ -287,21 +290,21 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
   is marked known from the previous November review, a few weeks earlier than the schedule's real release.
 - **IMF events are after the fact only.** They come from CBSL RSS titles (only the last ~10 items, read daily),
   have no history yet, so their ratio stays 1 until ≥ 4 are recorded. Board dates are not predicted.
-- **Small double-counting.** σ from past ensemble errors already contains some past event noise, and the event
+- **Small double-counting.** The learned band (from past ensemble errors) already contains some past event noise, and the event
   term adds more on top. The effect is small but makes event-day bands slightly conservative.
 - **`macro` is unproven.** It lost to the random walk in every bucket on 2026-11-11 and runs in shadow. Its
   promotion rule was first checked on one 60-day window (2026-11-11) and since 2026-11-12 on the 365-day replay
   scored over its last 300 days; it has still not been promoted.
 - **Brent is ~1 week stale** (FRED/EIA publishing delay), so the oil signal is the move from about 2 weeks ago.
 - **Treasury CSVs are slow** (up to ~19 s each). The first sync fetches 3 years one at a time, about a minute
-  longer; daily syncs fetch one year.
+  longer; daily syncs fetch the current year (plus the previous one in January).
 - **FRED from the dev machine:** the Claude Code sandbox blocks curl to `fred.stlouisfed.org`, though Node
   `fetch` worked during `npm run sync`. If a local sync fails for `fred-brent`, the production sync on Vercel is
   unaffected.
 - **`news` categories are tiny.** 1–11 events each within 2 years of rates; the drift estimates are mostly noise
   and are shrunk hard toward zero.
 - **The promotion margin is hard for `news` to reach.** It equals `naive` on ≈ 89% of forecasts, so even a real
-  post-announcement effect has to be large to make the whole bucket 2% better than the random walk.
+  post-announcement effect has to be large to pass the paired t-test vs the random walk for the whole bucket.
 - **Outcome classifiers are fragile.** They depend on the FOMC statement phrase "decided to … target range" and
   the CBSL PDF headline wording. Unparsable statements are stored as `unclear` (no drift learned from them);
   fetch failures show on the `outcomes` health row.
@@ -337,6 +340,10 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 | var | where | purpose |
 |---|---|---|
 | `DATABASE_URL` | Vercel (auto from Neon), `.env.local` | Postgres connection |
-| `CRON_SECRET` | Vercel env | protects `/api/cron/sync` |
+| `CRON_SECRET` | Vercel env | protects `/api/cron/sync` (required on any deployment; only `next dev` runs without it) |
+| `POSTGRES_URL` | Vercel (fallback) | used when `DATABASE_URL` is not set |
+| `REPLAY_BUDGET_MS` | optional, local | replay time budget per sync (default 40 000); `100000000` for a full replay |
+| `BACKTEST_BUDGET_MS` | optional | deadline (ms from sync start) for the version backtest: page-triggered syncs default 50 000, `npm run sync` 600 000; the cron always uses 240 000 |
+| `VERCEL_GIT_COMMIT_SHA` | set by Vercel | first 7 characters appended to `MODEL_VERSION` |
 
 Repo: https://github.com/osandadeshan/ratecast · Local DB container: `ratecast-pg` (port 54329).
