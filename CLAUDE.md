@@ -16,8 +16,8 @@
   - `run-locally`: start Postgres, sync, dev server, screenshot check.
   - `backtest`: compare every model to the random walk. For the current code use `npm run backtest`
     (in-memory, read-only, ~30 s: 365 days replayed, last 300 scored, Sundays excluded, three pairs). The
-    sync stores the same backtest once per `MODEL_VERSION` in `model_versions`. Older sections of the
-    skill still say 60/90 days: use 300 scored days.
+    sync stores the same backtest once per `MODEL_VERSION` in `model_versions`. All the skill's queries
+    score the last 300 days; results from before 2026-11-12 are labelled as the old 90-day replay.
   - `verify-deploy`: post-deploy checks on Vercel (live quote, cron, first sync).
   - `add-currency`: add a new target currency end to end.
   - `add-event-source`: add a new automatic policy-event scraper (kind, parser, health, backtest).

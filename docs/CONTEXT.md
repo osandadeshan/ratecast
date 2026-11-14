@@ -290,7 +290,8 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - **Small double-counting.** σ from past ensemble errors already contains some past event noise, and the event
   term adds more on top. The effect is small but makes event-day bands slightly conservative.
 - **`macro` is unproven.** It lost to the random walk in every bucket on 2026-11-11 and runs in shadow. Its
-  promotion rule has only been checked on one 60-day window.
+  promotion rule was first checked on one 60-day window (2026-11-11) and since 2026-11-12 on the 365-day replay
+  scored over its last 300 days; it has still not been promoted.
 - **Brent is ~1 week stale** (FRED/EIA publishing delay), so the oil signal is the move from about 2 weeks ago.
 - **Treasury CSVs are slow** (up to ~19 s each). The first sync fetches 3 years one at a time, about a minute
   longer; daily syncs fetch one year.

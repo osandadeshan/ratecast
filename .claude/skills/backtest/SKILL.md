@@ -23,10 +23,9 @@ per-model rows in `prediction_errors`.
    `REPLAY_BUDGET_MS=100000000 npm run sync` (~1 min on an empty DB; in the Claude Code sandbox:
    `REPLAY_BUDGET_MS=100000000 node --import tsx --env-file=.env.local scripts/sync.ts`). The log must show
    `replayed 365 past days` for all three pairs (`USD`, `USDLKR`, `LKR`).
-3. Score the last ~300 days (the first ~60 replayed days are warm-up, and no model can be promoted before
-   ≥ 30 distinct target dates). Exclude non-trading days (Sundays: Wise repeats Saturday):
-   add `AND extract(dow FROM target_date) <> 0` and use `made_on >= current_date - 300` in the queries below
-   (the older sections still say 60).
+3. Score forecasts made in the last 300 days (the first ~65 replayed days are warm-up, and no model can be
+   promoted before ≥ 30 distinct target dates). Exclude non-trading days (Sundays: Wise repeats Saturday).
+   Every query in this skill uses `made_on >= current_date - 300 AND extract(dow FROM target_date) <> 0`.
    ```bash
    docker exec ratecast-pg psql -U postgres -d rates -c "
    SELECT currency, model,
@@ -62,7 +61,7 @@ split by whether a known event's move (E+1) falls inside the forecast window.
        EXISTS (SELECT 1 FROM events ev WHERE ev.known_since <= n.made_on AND ev.event_date >= n.made_on
                AND ev.event_date + 1 <= n.target_date AND ev.kind IN ('fomc','cbsl_policy')) AS ev
      FROM new n JOIN bt_base b USING (currency, made_on, target_date)
-     WHERE n.made_on >= current_date - 60)
+     WHERE n.made_on >= current_date - 300 AND extract(dow FROM n.target_date) <> 0)
    SELECT currency, CASE WHEN horizon=1 THEN '1' WHEN horizon<=7 THEN '2-7' WHEN horizon<=14 THEN '8-14' ELSE '15-31' END hb, ev,
      count(*) n,
      round(avg(abs(b_err))::numeric,4) mae_old, round(avg(abs(pct_error))::numeric,4) mae_new,
@@ -78,7 +77,8 @@ split by whether a known event's move (E+1) falls inside the forecast window.
 
 Event baseline (2026-11-11): MAE identical in all buckets. USD event-window coverage 1d 66.7→100% (n=3),
 8–14d 85.6→87.2%, 15–31d 87.5→88.1%. LKR event windows were already ~97% covered, and widths grew (2–7d
-1.17→1.39%). The 60-day window holds only 2–3 events per kind, so the test is inconclusive. Learned ratios
+1.17→1.39%). That run used the old 90-day replay scored over 60 days, which holds only 2–3 events per kind, so
+it was inconclusive; the 300-day window holds ~6 FOMC and ~5 CBSL reviews. Learned ratios
 (2 years): LKR cbsl_policy 2.09, fomc 1.00; USD fomc 1.49, cbsl_policy 1.15.
 
 ## Shadow / new model (e.g. `macro`, `news`)
@@ -93,12 +93,14 @@ A new model must not make the ensemble worse. Measure it fairly against the same
      round(avg(abs(o.pct_error))::numeric,4) ens_old, round(avg(abs(n.pct_error))::numeric,4) ens_new,
      count(*) FILTER (WHERE abs(o.pct_error-n.pct_error)>1e-9) differ
    FROM prediction_errors n JOIN bt_base o USING (currency, model, made_on, target_date)
-   WHERE n.model='ensemble' AND n.made_on >= current_date-60 GROUP BY 1,2 ORDER BY 1,2;"
+   WHERE n.model='ensemble' AND n.made_on >= current_date-300 AND extract(dow FROM n.target_date) <> 0
+   GROUP BY 1,2 ORDER BY 1,2;"
    docker exec ratecast-pg psql -U postgres -d rates -c "
    SELECT currency, CASE WHEN horizon=1 THEN '1' WHEN horizon<=7 THEN '2-7' WHEN horizon<=14 THEN '8-14' ELSE '15-31' END b,
      round(avg(abs(pct_error)) FILTER (WHERE model='naive')::numeric,4) naive,
      round(avg(abs(pct_error)) FILTER (WHERE model='macro')::numeric,4) model
-   FROM prediction_errors WHERE made_on >= current_date-60 GROUP BY 1,2 ORDER BY 1,2;"
+   FROM prediction_errors WHERE made_on >= current_date-300 AND extract(dow FROM target_date) <> 0
+   GROUP BY 1,2 ORDER BY 1,2;"
    ```
 3. **Promotion state today:** `SELECT currency, b->>'bucket', b->'promoted' FROM model_stats, jsonb_array_elements(stats->'buckets') b WHERE as_of=(SELECT max(as_of) FROM model_stats);`
    `model_stats` keeps only the live day, so promotions *during* replay show up only as `differ > 0`.
@@ -107,7 +109,8 @@ A new model must not make the ensemble worse. Measure it fairly against the same
 5. Accept per the usual rule (ensemble no worse in every bucket). Never hand-promote or loosen the gate to pass.
    Drop `bt_base` when done.
 
-Macro results (2026-11-11), MAE % over the last 60 days:
+Macro results (2026-11-11, old setup: 90-day replay, MAE % over the last 60 days; superseded by the gating
+results below, which use the current 365/300-day setup):
 - `macro` alone was slightly worse than `naive` everywhere (e.g. LKR 1d 0.1273 vs 0.1240, USD 15–31d 0.2790 vs 0.2688).
 - Fully weighted (~15%), it worsened the LKR ensemble: 15–31d 0.3982→0.4024, 8–14d 0.2698→0.2715.
 - In shadow with promotion off, the ensemble was identical in all 8 buckets.
@@ -116,7 +119,7 @@ Macro results (2026-11-11), MAE % over the last 60 days:
   everything else identical. That technically breaks "no worse in every bucket" by 0.0006 pp. The owner accepted
   this on 2026-11-11 and kept auto-promotion on (see `docs/CONTEXT.md`). Don't re-raise it or tune the thresholds.
 
-News results (2026-11-11, Phase 3), same method (`// news, (BT-TEMP)`):
+News results (2026-11-11, Phase 3, same old 90/60-day setup), same method (`// news, (BT-TEMP)`):
 - The ensemble was **identical in all 8 buckets**: `news` was never promoted during the replay.
 - `news` vs `naive` MAE %: LKR 1d 0.1235/0.1240, 2–7d 0.2197/0.2203, 8–14d 0.2654/0.2672, 15–31d 0.4081/0.3970;
   USD 1d 0.0931/0.0911, 2–7d 0.1795/0.1770, 8–14d 0.2079/0.2135, 15–31d 0.2769/0.2688. It differed from naive on
@@ -141,6 +144,13 @@ Gating results (2026-11-12/13, 365-day replay, last 300 days, Sundays excluded),
 - `cbsl_gap` vs naive: SGD→LKR 2–7d 0.4397, 8–14d 0.6126 (−2.3%), 15–31d 0.9276; worse for USD→LKR (0.1857,
   0.3630, 0.5729, 1.0188). Out-of-sample (fit before 2026-03, test after) SGD→LKR 7d −5.7%. Not promoted yet.
 - 80% band coverage (q80 band): SGD→USD ~90%, USD→LKR 78–82%, SGD→LKR 85–96%.
+
+Phase 4 results (2026-11-14, `npm run backtest`, same 365/300-day setup, `MODEL_VERSION` 2026.11.14):
+- Skill (final forecast MAE ÷ random walk): SGD→USD 1.0000, USD→LKR 1.0000, SGD→LKR 0.9934 ("same" as 2026.11.13).
+- 80% coverage with the recency-weighted band (half-life 30 days): SGD→USD 81.6%, USD→LKR 70.7%, SGD→LKR 79.1%.
+- `arima` vs naive: equal on SGD→USD, worse on USD→LKR, SGD→LKR 8–31d −1.3 to −1.6% (not significant, weight 0).
+- `usd_broad` helps `macro` slightly for SGD→USD only; `macro` is still worse than naive. BLS CPI/jobs widening
+  over-covered, so those kinds are display-only. Full tables are in `docs/CONTEXT.md`.
 - The scoring INSERT needs `enable_nestloop = off` after a big replay (13 min → 8 s); it's in `lib/sync.ts`.
 
 Older baseline (2026-11-09, 90-day replay), ensemble / naive MAE %: LKR 1d 0.126/0.126 · 15–31d 0.396/0.399; USD 1d 0.095/0.093 ·
