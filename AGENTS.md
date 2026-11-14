@@ -31,7 +31,7 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
-| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 86 tests) |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 88 tests) |
 | Backtest current code (read-only) | `npm run backtest` (~30 s; same code path as the sync) |
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |

@@ -52,7 +52,7 @@ export interface LiveQuote {
   providers: ProviderQuote[];
 }
 
-interface WiseComparison {
+export interface WiseComparison {
   providers: {
     name: string;
     alias: string;
@@ -74,11 +74,16 @@ export async function fetchWiseComparison(target: Target, sendAmount = 1000): Pr
     `https://wise.com/gateway/v4/comparisons?sendAmount=${sendAmount}&sourceCurrency=${PAIRS[target].base}` +
     `&targetCurrency=${PAIRS[target].quote}&filter=POPULAR&includeWise=true&numberOfProviders=3` +
     `&sourceCountry=SG&payInMethod=BANK_TRANSFER`;
-  const data = await getJSON<WiseComparison>(url);
+  return parseWiseComparison(target, await getJSON<WiseComparison>(url), sendAmount);
+}
 
+/** Pure: providers sorted by amount received, and the mid rate (Wise's own quote first). */
+export function parseWiseComparison(target: Target, data: WiseComparison, sendAmount = 1000): LiveQuote {
   const providers: ProviderQuote[] = [];
-  let midRate: number | null = null;
-  let collected: string | null = null;
+  // Wise's own quote is the reference. Another provider flagged "mid-market" (e.g. Remitly at 0.04% markup for
+  // USD→LKR on 2026-11-14) is only a fallback if Wise is missing: provider order is not guaranteed.
+  let wiseMid: { rate: number; at: string | null } | null = null;
+  let otherMid: { rate: number; at: string | null } | null = null;
   for (const p of data.providers ?? []) {
     if (!p.quotes?.length) continue;
     const best = p.quotes.reduce((a, b) => (b.receivedAmount > a.receivedAmount ? b : a));
@@ -92,11 +97,12 @@ export async function fetchWiseComparison(target: Target, sendAmount = 1000): Pr
       markupPct: best.markup ?? 0,
       isMidMarket: Boolean(best.isConsideredMidMarketRate),
     });
-    if (p.alias === "wise" || best.isConsideredMidMarketRate) {
-      midRate ??= best.rate;
-      collected ??= best.dateCollected;
-    }
+    if (p.alias === "wise") wiseMid ??= { rate: best.rate, at: best.dateCollected ?? null };
+    else if (best.isConsideredMidMarketRate) otherMid ??= { rate: best.rate, at: best.dateCollected ?? null };
   }
+  const mid = wiseMid ?? otherMid;
+  const midRate = mid?.rate ?? null;
+  const collected = mid?.at ?? null;
   if (midRate == null) throw new Error(`Wise comparison returned no mid-market rate for ${target}`);
   providers.sort((a, b) => b.received - a.received);
 

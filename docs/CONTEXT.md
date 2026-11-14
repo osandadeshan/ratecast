@@ -304,6 +304,10 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - **Outcome classifiers are fragile.** They depend on the FOMC statement phrase "decided to … target range" and
   the CBSL PDF headline wording. Unparsable statements are stored as `unclear` (no drift learned from them);
   fetch failures show on the `outcomes` health row.
+- ~~Today's USD→LKR "live Wise" rate could be another provider's~~: fixed 2026-11-14. The comparison API also
+  flags e.g. Remitly as mid-market, and the first such provider in the list won (332.46 vs Wise 332.59).
+  `parseWiseComparison` now always prefers Wise's own quote. The live forecasts already stored on 2026-11-13/14
+  happened to anchor on 332.59/332.60 (the official point), so no stored forecast was affected.
 - ~~Live forecast used the ECB basket `<= today`~~: fixed, live and replay both use `< anchor`.
 - **No model beats the random walk yet** (2026-11-13). The forecast equals "no change" in every bucket. That
   is the honest floor; candidates (`cbsl_gap`, `mean_reversion`, `macro`) are promoted automatically if

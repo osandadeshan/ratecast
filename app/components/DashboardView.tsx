@@ -366,7 +366,7 @@ function MarketCard({
       </dl>
       {macro.length > 0 && (
         <p className="text-xs text-ink-3 mt-2">
-          These feed the &ldquo;US yields + oil&rdquo;{c.quote === "LKR" ? <> and &ldquo;Sri Lanka data (CBSL)&rdquo;</> : null}{" "}
+          These feed the &ldquo;{MODEL_LABELS.macro}&rdquo;{c.quote === "LKR" ? <> and &ldquo;Sri Lanka data (CBSL)&rdquo;</> : null}{" "}
           models. Like every model, they only count once they beat the random walk by a clear margin.
         </p>
       )}
@@ -438,8 +438,9 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
     <section className="card p-4 sm:p-5 min-w-0">
       <h2 className="text-lg font-semibold">Policy events</h2>
       <p className="text-xs text-ink-3 mt-0.5 mb-3">
-        Scheduled central-bank decisions, read automatically from the Fed and CBSL. They only widen the 80% range for
-        {c.label}; the predicted number doesn&apos;t change, because nobody knows the decision in advance.
+        Scheduled central-bank decisions and US data releases, read automatically from the Fed, CBSL and BLS. They can
+        only widen the 80% range for {c.label}; the predicted number doesn&apos;t change, because nobody knows the
+        outcome in advance.
       </p>
       {events.upcoming.length === 0 ? (
         <p className="text-sm text-ink-3">No scheduled decisions in the next 75 days.</p>
