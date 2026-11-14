@@ -17,7 +17,17 @@ export interface Point {
   rate: number;
 }
 
-/** Keep only points that are positive, finite and within the jump limit of the previous kept point. */
+/**
+ * A jump that then holds this many days in a row (each within the limit of the one before) is a real
+ * new level (e.g. a devaluation), not a bad point: all of those points are accepted. Without this, one
+ * large real move would freeze the pair's data for good.
+ */
+export const NEW_LEVEL_DAYS = 5;
+
+/**
+ * Keep only points that are positive, finite and within the jump limit of the previous kept point,
+ * unless the jump holds for NEW_LEVEL_DAYS consecutive points (then the new level is accepted).
+ */
 export function validateHistory(
   pair: string,
   points: Point[],
@@ -27,6 +37,7 @@ export function validateHistory(
   const ok: Point[] = [];
   const rejected: { date: string; rate: number; reason: string }[] = [];
   let prev = previous;
+  let pending: Point[] = []; // consecutive jump-rejected points that agree with each other
   for (const p of [...points].sort((a, b) => a.date.localeCompare(b.date))) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(p.date)) {
       rejected.push({ ...p, reason: "bad date" });
@@ -37,11 +48,22 @@ export function validateHistory(
       continue;
     }
     if (prev && Math.abs(Math.log(p.rate / prev.rate)) > limit) {
+      const last = pending.at(-1);
+      pending = last && Math.abs(Math.log(p.rate / last.rate)) <= limit ? [...pending, p] : [p];
+      if (pending.length >= NEW_LEVEL_DAYS) {
+        const accepted = new Set(pending.map((x) => x.date));
+        for (let i = rejected.length - 1; i >= 0; i--) if (accepted.has(rejected[i].date)) rejected.splice(i, 1);
+        ok.push(...pending);
+        prev = p;
+        pending = [];
+        continue;
+      }
       rejected.push({ ...p, reason: `jump of ${((p.rate / prev.rate - 1) * 100).toFixed(1)}% vs ${prev.date}` });
       continue;
     }
     ok.push(p);
     prev = p;
+    pending = [];
   }
   return { ok, rejected };
 }

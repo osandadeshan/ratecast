@@ -47,9 +47,17 @@ export function parseTreasuryCsv(csv: string, column = "2 Yr"): Point[] {
 
 export async function fetchTreasury2y(years: number[]): Promise<Point[]> {
   // One year at a time, to stay polite to home.treasury.gov.
+  // A year that fails (e.g. the new year's file before its first trading day) doesn't cost the others.
   const out: Point[] = [];
-  for (const y of years) out.push(...parseTreasuryCsv(await getText(treasuryUrl(y), TREASURY_REQUEST)));
-  if (!out.length) throw new Error("Treasury CSV: no '2 Yr' values (layout changed?)");
+  const errors: string[] = [];
+  for (const y of years) {
+    try {
+      out.push(...parseTreasuryCsv(await getText(treasuryUrl(y), TREASURY_REQUEST)));
+    } catch (e) {
+      errors.push(`${y}: ${(e as Error).message}`);
+    }
+  }
+  if (!out.length) throw new Error(errors.length ? `Treasury CSV failed (${errors.join("; ")})` : "Treasury CSV: no '2 Yr' values (layout changed?)");
   return out;
 }
 

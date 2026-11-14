@@ -94,7 +94,7 @@ export function learnEventVol(rates: Map<string, number>, events: EventRecord[],
 /**
  * Extra log-variance to add to the band of a forecast made on `anchor` for `target`:
  * one ordinary 2-day variance × (ratio − 1) for every known event whose move falls inside
- * (anchor, target]. Events not yet public at `anchor` are ignored.
+ * (anchor, target]; an event on the anchor day counts half. Events not yet public at `anchor` are ignored.
  */
 export function eventExtraVar(events: EventRecord[], stats: EventVolStat[], anchor: string, target: string): number {
   let extra = 0;
@@ -106,7 +106,9 @@ export function eventExtraVar(events: EventRecord[], stats: EventVolStat[], anch
     seen.add(key);
     if (!(EVENT_KINDS as Record<string, { widens: boolean }>)[e.kind]?.widens) continue;
     const s = stats.find((x) => x.kind === e.kind);
-    if (s) extra += (s.ratio - 1) * s.base2;
+    // An event on the anchor day itself: the E−1 → E half of its move window is already in the anchor
+    // rate, so only the remaining half of its extra variance is still ahead.
+    if (s) extra += (s.ratio - 1) * s.base2 * (e.eventDate === anchor ? 0.5 : 1);
   }
   return extra;
 }

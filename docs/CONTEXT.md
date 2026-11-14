@@ -94,7 +94,7 @@ automated yet: no reachable source in the survey above.
 | No hand-maintained calendars; scrape Fed/CBSL/BLS and track `source_health` | owner requirement (fully automatic); breakage is visible on the page instead of silent |
 | Own PDF text extraction (`node:zlib`) instead of a PDF library | CBSL PDFs are simple; no new dependency |
 | `macro` uses factor moves lagged past publication (yield 1 day, Brent 9 days, broad dollar index 10 days), applied identically in replay and live | Wise's UTC-midnight point already contains the last US close; only slow pass-through can add anything, and the backtest must not see data the live run wouldn't have |
-| Unproven models run in **shadow mode** (scored daily, weight 0 until ≥ 30 distinct target dates and a paired t-test vs naive with t < −2.6 per bucket; until 2026-11-13 the bar was ≥ 2% better than naive). Since 2026-11-13 every model except `naive` is gated this way | near-equal MAEs give near-equal weights under the 1/MAE⁴ rule, so a weak model would still take ~15% of the blend; promotion stays automatic (owner requirement) |
+| Unproven models run in **shadow mode** (scored daily, weight 0 until ≥ 30 distinct target dates and a paired t-test vs naive with t < −2.6 per bucket, stricter (Student-t 99.5%) when n_eff < ~120, and n_eff ≥ 5; until 2026-11-13 the bar was ≥ 2% better than naive). Since 2026-11-13 every model except `naive` is gated this way | near-equal MAEs give near-equal weights under the 1/MAE⁴ rule, so a weak model would still take ~15% of the blend; promotion stays automatic (owner requirement) |
 | Promotion counts distinct target dates, not forecasts | long-horizon forecasts overlap; "≥ 60 forecasts" promoted `macro` on thin evidence and hurt LKR 8–31 days |
 | Automatic promotion stays on despite a +0.0006 pp slip in one bucket (owner, 2026-11-11) | the only alternative is a manual switch, which breaks "fully automatic"; the slip is noise-sized and demotion is automatic too |
 | Polymarket/Kalshi deferred | rolling single-meeting contracts, short histories; the 2y yield carries the same information |
@@ -182,7 +182,7 @@ in the last 300 days. Average |% miss|, `ensemble` / `naive`:
 | USD→LKR | 0.1788 / 0.1788 | 0.3382 / 0.3382 | 0.5595 / 0.5595 | 1.0087 / 1.0087 |
 
 - Before the gate, the ensemble was **worse** than the random walk in every bucket (e.g. SGD→USD 15–31d
-  +15%). Now no model passes the significance test (t < −2.6) in any bucket, so the ensemble equals the random
+  +15%). Now no model passes the significance test (t < −2.6, Student-t for small samples) in any bucket, so the ensemble equals the random
   walk: no longer worse, not better. Honest result: over a year, no model here reliably beats "no change".
 - Best candidates, MAE vs naive: `cbsl_gap` SGD→LKR 8–14d −2.3%, 2–7d −0.4%, 15–31d −0.5% (but +2–7% worse
   for USD→LKR); `mean_reversion` SGD→LKR 1d −0.3%; `macro` USD→LKR 15–31d −0.9%. None is significant yet.
@@ -272,6 +272,29 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
   overlapping anchors, nowhere near significant. Both would also need a Python runtime or a model artifact
   on Vercel, which the free tier and the "one code path" rule argue against.
 
+**2026-11-14 · Audit fixes (`2026.11.14.2`).** Same setup (fixed date 2026-11-13, 365 replayed, last 300
+scored, Sundays excluded). Changes: Student-t promotion bar with n_eff ≥ 5, learning window ends at t − 1,
+shrinkage by distinct dates, finite guards on model outputs and errors, one-sided trend stretch of the band for
+the LKR pairs (c = 0.4), an event on the anchor day counts half, a weekday is released from "non-trading" once it
+moved on 2 of its last 4 occurrences; plus the batch-1 `known_since` corrections (unscheduled FOMC and IMF from
+E+1, CBSL reviews without a predecessor from E unless Jan–Apr).
+
+| pair | skill before → after | 80% coverage before → after | after, by bucket (1 / 2–3 / 4–7 / 8–14 / 15–31) |
+|---|---|---|---|
+| SGD→USD | 1.0000 → 1.0000 | 81.6% → 81.5% | 82.1 / 82.3 / 80.4 / 81.0 / 81.8% |
+| USD→LKR | 1.0000 → 1.0000 | 70.7% → 75.2% | 79.8 / 80.0 / 80.4 / 77.3 / 72.4% |
+| SGD→LKR | 0.9934 → 1.0000 | 79.1% → 83.0% | 79.0 / 81.7 / 82.5 / 82.2 / 83.9% |
+
+- SGD→LKR's 0.7% "gain" came from `holt` / `drift` / `monthly_pattern` promoted at 15–31 days on 8–31 dates
+  (n_eff ≈ 1–8), where a normal 2.6 bar is far too loose (Student-t 99.5% at 4 df is 4.6). The stricter bar
+  rejects them, so the final forecast is the random walk everywhere: 1.0000 is the honest figure, the earlier
+  0.9934 was luck. This is the one bucket that got worse (15–31d 0.9332 → 0.9431 % MAE), accepted on purpose.
+- The trend stretch lifts USD→LKR 15–31d from 66% to 72.4% and 8–14d from 74.5% to 77.3%; SGD→LKR slightly
+  over-covers at 15–31 days (83.9%). Tested on SGD→USD too: coverage 84.9%, interval score +3% worse, so it's off
+  there. c = 0.4 was the best of 0.2–0.8 on interval score for both LKR pairs.
+- Tried and not adopted in this round: adaptive conformal updating (γ = 0.02: coverage 78–82% but wider, worse
+  interval score), EWMA volatility scaling, per-weekday q80, signed (asymmetric) quantiles.
+
 ## Known limitations / risks
 - **Wise may block Vercel IPs** (untested at the time of writing). The live quote and sync would fail; check
   with the `verify-deploy` skill.
@@ -316,8 +339,9 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
 - **No model beats the random walk yet** (2026-11-13). The forecast equals "no change" in every bucket. That
   is the honest floor; candidates (`cbsl_gap`, `mean_reversion`, `macro`) are promoted automatically if
   they become significantly better.
-- **USD→LKR 80% band under-covers** (2026-11-14 backtest: 78% at 1–7 days, 74.5% at 8–14, 66% at 15–31) because
-  its errors come in regimes. The 30-day recency weighting helped (67.2% → 70.7% overall). Watch it.
+- **USD→LKR 80% band still under-covers at long horizons** (2026-11-14, `2026.11.14.2`: 80% at 1–7 days, 77.3% at
+  8–14, 72.4% at 15–31) because its errors come in regimes. Recency weighting (67.2 → 70.7%) and the trend
+  stretch (→ 75.2% overall) helped. Watch it.
 - **CBSL reserves / net USD purchases aren't ingested.** They're only in a weekly PDF the dependency-free
   PDF reader can't extract text from.
 - **CBSL monthly tables are published 1–2 months late**, so policy-rate, T-bill, remittance and tourism

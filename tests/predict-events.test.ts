@@ -125,8 +125,8 @@ test("eventExtraVar: an event counts when its move (E+1) falls inside (anchor, t
   near(eventExtraVar(e, STATS, ANCHOR, addDays(ANCHOR, 31)), 2e-4);
 });
 
-test("eventExtraVar: an event on the anchor day still affects tomorrow, a past one does not", () => {
-  near(eventExtraVar([ev("fomc", ANCHOR)], STATS, ANCHOR, addDays(ANCHOR, 1)), 2e-4);
+test("eventExtraVar: an event on the anchor day counts half (its E-1 → E move is in the anchor), a past one not at all", () => {
+  near(eventExtraVar([ev("fomc", ANCHOR)], STATS, ANCHOR, addDays(ANCHOR, 1)), 1e-4);
   assert.equal(eventExtraVar([ev("fomc", addDays(ANCHOR, -1))], STATS, ANCHOR, addDays(ANCHOR, 5)), 0);
 });
 

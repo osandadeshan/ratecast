@@ -29,7 +29,7 @@ paths:
   | `source_health` | `recordHealth` (sync) | PK source. Last ok / error / note per automatic source: fed-page, fed-json, cbsl-mpr, cbsl-rss, bls, outcomes, treasury, fred-brent, fred-usd-broad, cbsl-fx, cbsl-rates, cbsl-external, cbsl-prices, wise-history:*, wise-live:*, cross-rate |
   | `model_versions` | `backtestVersion` (sync step 4b) | PK version. One row per `MODEL_VERSION` that ran (`first_run`); `backtest` (JSON from `runBacktest`), `backtest_on`, `previous`, `comparison` written once, never updated. Step 4b runs only when the replay is complete (not `partial`), and the backtest is stored only when it finished inside its budget (page sync 50 s from sync start, `BACKTEST_BUDGET_MS`; cron 240 s, `CRON_BACKTEST_BUDGET_MS`) |
   | `learning_log` | predict (live run) | PK (currency, as_of, bucket, item). Append-only audit of promotions/demotions (model or `bias_correction`) vs the previous stored `model_stats`, with the deciding t |
-  | `sync_runs`, `sync_lock` | runSync | lock row expires after 5 min; `sync_runs.model_version` |
+  | `sync_runs`, `sync_lock` | runSync | lock row has an owner token and expires after `SYNC_LOCK_MINUTES` (6); `sync_runs.model_version` |
 - **Scoring** (`evaluatePredictions`): `ANALYZE predictions, prediction_errors, rates_history` and then one `INSERT … SELECT` inside
   `sql.begin` with `SET LOCAL enable_nestloop = off`. After a 365-day replay (~454k rows on 2026-11-12) the planner otherwise
   chose nested loops and the insert took 13 min (8 s with the setting). Don't remove it.

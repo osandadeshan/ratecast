@@ -135,18 +135,18 @@ All free, no API keys.
 ```mermaid
 flowchart TD
     T1["⏰ Vercel Cron<br/>daily, 01:30 UTC = 09:30 SGT<br/>Hobby plan: runs within that hour"] --> RUN
-    T2["👤 Someone opens the page"] --> CHK{"Successful sync already<br/>for today's date, SGT?"}
+    T2["👤 Someone opens the page<br/>(from 10:30 SGT)"] --> CHK{"Successful sync already today (SGT),<br/>or one started < 15 min ago?"}
     CHK -->|yes, the usual case| NOOP["Nothing more.<br/>Page shows stored data"]
     CHK -->|no| BG["Start sync in background<br/>after the page is sent"]
     BG --> RUN
-    RUN{"Sync lock free?"} -->|no, another sync running| SKIP["Skip"]
+    RUN{"Sync lock free?"} -->|no, another sync running| SKIP["Skip<br/>(the cron waits up to 70 s first)"]
     RUN -->|yes| SYNC["Run full sync<br/>~10–20 s normally; first time replays<br/>365 days in 40 s slices"]
 ```
 
 | Trigger | When | Purpose |
 |---|---|---|
 | **Daily cron** | Every day 01:00–01:59 UTC (09:00–09:59 SGT) | Main schedule. Always runs, even if a sync already happened that day (it refreshes the forecast with a newer live rate). |
-| **First visit of the day** | First page view after midnight SGT, only if no successful sync exists for that date | Backup, so a missed or failed cron never leaves the site stale. The visitor doesn't wait; the next page load shows fresh data. |
+| **First visit of the day** | First page view from 10:30 SGT, only if no successful sync exists for that date and none started in the last 15 min | Backup, so a missed or failed cron never leaves the site stale. Not earlier, so a visitor never makes the day's permanent forecast before the cron has the morning's data. The visitor doesn't wait; the next page load shows fresh data. |
 | **Manual** | `GET /api/cron/sync` with `Authorization: Bearer <CRON_SECRET>`, or `npm run sync` locally | Debugging / forcing a refresh |
 
 A typical day:
@@ -178,7 +178,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    L["🔒 Take sync lock<br/>expires after 5 min"] --> M
+    L["🔒 Take sync lock<br/>expires after 6 min"] --> M
     M["1 · Market data<br/>ECB dollar-strength series<br/>+ cross-check rates"] --> MA
     MA["1a · Macro factors<br/>Treasury 2y yield + FRED Brent + broad dollar index<br/>+ CBSL rates and tables → market_data<br/>scraper status → source_health"] --> EV
     EV["1b · Policy events<br/>Fed + CBSL + BLS calendars → events<br/>+ decision outcomes from statements<br/>scraper status → source_health"] --> I
@@ -195,7 +195,7 @@ flowchart TD
 | **1. Market data** | Frankfurter, ExchangeRate-API, Currency-API | `market_data` | USD strength = average of log(EUR, JPY, GBP, CNY per USD); rises when the dollar strengthens |
 | **1a. Macro factors** | Treasury yield CSV, FRED Brent + broad dollar index CSV, CBSL rate lookup + statistical .xlsx | `market_data` (`ust2y`, `brent`, `usd_broad`, `lk_*`), `source_health` (`treasury`, `fred-brent`, `fred-usd-broad`, `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices`) | Same failure model as 1b (shared `recordHealth` helper). A missing factor just means the model using it falls back to "no change" |
 | **1b. Policy events** | Fed page + JSON, CBSL review list + latest PDF, CBSL RSS, BLS release schedule (US CPI, jobs report); then each past event's own statement (FOMC HTML, CBSL review PDF) | `events` (incl. `outcome`), `source_health` (incl. `outcomes`) | Each source fails on its own: a failure is logged and recorded in `source_health`, never fails the sync. Outcomes: past events with no outcome (last ~800 days), newest first, at most 32 statements per run |
-| **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes`, `source_health` (`wise-history:*`, `wise-live:*`, `cross-rate`) | History rows are `source='wise'` (official). Points are validated first (`lib/sources/validate.ts`); rejects are dropped and reported. Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it. Then SGD → LKR is checked against SGD → USD × USD → LKR (limit 0.5%) |
+| **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes`, `source_health` (`wise-history:*`, `wise-live:*`, `cross-rate`) | History rows are `source='wise'` (official). Points are validated first (`lib/sources/validate.ts`); rejects are dropped and reported. A jump beyond the limit that holds for 5 consecutive days is accepted as a new level. Re-reads update market data, except first-seen monthly CBSL series (remittances, tourism, CPI, policy rate, T-bill), which keep their first value so the replay sees what was known then. Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it. Then SGD → LKR is checked against SGD → USD × USD → LKR (limit 0.5%) |
 | **3. Score** | `predictions` + official `rates_history` | `prediction_errors` | For each forecast: predicted, actual, delta = actual − predicted, % miss. Only official rates count as "actual". One INSERT…SELECT with nested loops disabled (after a big replay the planner otherwise picked a plan that took 13 min instead of 8 s) |
 | **4. Fill gaps** | stored rates, errors | `predictions` | On first deploy this replays 365 days (40 s per run, resumed on the next run until done), so the learner starts with real statistics. Afterwards it only fills days the cron missed |
 | **5. Learn + forecast** | rates, ECB series, macro + CBSL factors, errors, events + outcomes, the legs' forecasts | `model_stats`, `predictions` | 12 models × 31 days ahead, blended with learned weights. Every model except the random walk gets weight 0 until it is statistically better than the random walk in that horizon bucket. Known Fed/CBSL/IMF events widen the 80% range (step 4's replay does the same, using only events public on each day); US CPI/jobs days are shown only. Forecasts are **write-once**: a second run on the same day keeps the first forecast. Promotions/demotions go to `learning_log` |
@@ -329,7 +329,8 @@ The same row is written for each of the 12 models and for `blend` / `blend_bc`. 
 random walk**, not only the new ones: the 365-day replay showed the classic models made the forecast worse
 than "no change" at every horizon. A model is run and scored every day, but gets weight 0 in a horizon bucket
 until it has been scored on **≥ 30 distinct target dates** there **and** a paired t-test on its per-day misses
-vs the random walk's gives **t < −2.6**. The sample size is divided by the bucket's mean horizon, because
+vs the random walk's gives **t < −2.6** (stricter for small samples: the Student-t 99.5% value, e.g. 4.6 with
+5 effective days, and at least 5 effective days). The sample size is divided by the bucket's mean horizon, because
 neighbouring forecasts overlap. 2.6 is a Bonferroni correction for ~10 candidates per bucket: a plain t < −2
 promoted a lucky model for USD→LKR in May 2026 and made 2–7 day forecasts 5% worse. Promotion and demotion are
 automatic and daily; the weights table shows "not used" until then. `SHADOW_MODELS` (`macro`, `news`,
@@ -606,7 +607,7 @@ npm run dev       # http://localhost:3000
 | `npm run sync` | One full sync against `.env.local`'s database |
 | `npm run dev` / `npm run build` / `npm start` | Next.js dev / production build / production server |
 | `npm run lint`, `npx tsc --noEmit` | Lint, typecheck |
-| `npm test` | Unit tests (88). Inside the Claude Code sandbox use `node --import tsx --test tests/*.test.ts`, because the `tsx` CLI needs an IPC socket the sandbox blocks |
+| `npm test` | Unit tests (94). Inside the Claude Code sandbox use `node --import tsx --test tests/*.test.ts`, because the `tsx` CLI needs an IPC socket the sandbox blocks |
 | `REPLAY_BUDGET_MS=100000000 npm run sync` | Full 365-day replay in one run (about 1 minute locally) |
 
 ---
@@ -623,7 +624,7 @@ npm run dev       # http://localhost:3000
 
 ## Accuracy: what to expect
 
-Backtest on 13 Nov 2026 (the 14 Nov version `2026.11.14` gives the same point forecasts): 365-day no-look-ahead replay, forecasts made in the last 300 days, Sundays excluded,
+Backtest on 13 Nov 2026 (the 14 Nov versions `2026.11.14` and `2026.11.14.2` give the same point forecasts in these buckets): 365-day no-look-ahead replay, forecasts made in the last 300 days, Sundays excluded,
 average miss (%), final forecast vs "no change":
 
 | | 1 day | 2–7 days | 8–14 days | 15–31 days |
@@ -636,8 +637,10 @@ Before the significance gate (12 Nov 2026) the forecast was *worse* than "no cha
 15% for SGD → USD at 15–31 days). Now no model has proven itself, so the forecast equals "no change". That's
 the honest floor; candidates keep being scored and are switched on automatically if they prove better. The
 closest are `cbsl_gap` for SGD → LKR (−2.3% at 8–14 days) and `macro` for USD → LKR at 15–31 days (−0.9%).
-80% ranges (version `2026.11.14`, weighted toward recent misses) hold 81.6% of actual rates overall for
-SGD → USD, 78.9% for SGD → LKR and 70.7% for USD → LKR (66% at 15–31 days: its misses come in regimes).
+80% ranges (version `2026.11.14.2`, weighted toward recent misses, and for the LKR pairs wider on the side the
+30-day trend points to) hold 81.5% of actual rates overall for SGD → USD, 83.0% for SGD → LKR and 75.2% for
+USD → LKR (72% at 15–31 days: its misses come in regimes). With the stricter gate (14 Nov 2026) the final
+forecast equals "no change" for all three pairs; the earlier 0.7% SGD → LKR gain at 15–31 days was luck.
 
 Also tested and rejected (14 Nov 2026, offline, same window): Prophet was 2–6× worse than "no change" at every
 horizon, XGBoost lost in 13 of 15 pair/horizon cells. Neither was added.

@@ -56,7 +56,8 @@ test("parseFomcPage: scheduled meetings are known 300 days ahead, unscheduled on
   assert.equal(jan.kind, "fomc");
   assert.equal(jan.knownSince, addDays("2024-01-31", -300));
   const unscheduled = ev.find((e) => e.eventDate === "2024-09-15")!;
-  assert.equal(unscheduled.knownSince, "2024-09-15");
+  // Unscheduled: announced in US time, after that day's 09:30 SGT sync, so known from the next day.
+  assert.equal(unscheduled.knownSince, "2024-09-16");
   assert.match(unscheduled.title, /unscheduled/);
 });
 
@@ -107,6 +108,14 @@ test("parseCbslNextDate finds the next review date, even with broken spacing", (
     "2026-11-20",
   );
   assert.equal(parseCbslNextDate("The next statement is scheduled for 5 March, 2027."), "2027-03-05");
+});
+
+test("parsers drop dates that don't exist instead of failing the sync", () => {
+  assert.equal(parseCbslNextDate("The next regular statement will be on 31 November 2026."), null);
+  assert.deepEqual(
+    parseCbslList('<a href="/files/press_20261131_Monetary_Policy_Review_No_7_2026_e.pdf">x</a>').map((r) => r.date),
+    [],
+  );
 });
 
 test("parseCbslNextDate returns null when no next date is named (year-end statement)", () => {
@@ -181,7 +190,7 @@ test("parseCbslRss keeps IMF items only, dated in Sri Lanka time, with an outcom
   // 20:31 UTC is 02:01 the next day in Colombo (UTC+5:30)
   assert.deepEqual(
     { kind: ev[0].kind, eventDate: ev[0].eventDate, knownSince: ev[0].knownSince, outcome: ev[0].outcome, url: ev[0].url },
-    { kind: "imf", eventDate: "2026-10-31", knownSince: "2026-10-31", outcome: "board", url: "https://www.cbsl.gov.lk/en/news/imf-fifth-review" },
+    { kind: "imf", eventDate: "2026-10-31", knownSince: "2026-11-01", outcome: "board", url: "https://www.cbsl.gov.lk/en/news/imf-fifth-review" },
   );
   assert.equal(ev[0].title, "IMF Executive Board Completes the Fifth Review & Approves Disbursement");
   assert.equal(ev[1].eventDate, "2026-10-06");

@@ -7,7 +7,7 @@ description: Add a new macro factor (e.g. US 10y yield, DXY, gold, SGD rates) as
 
 Read `.claude/rules/macro.md` and `.claude/rules/forecasting.md` first. Requirements: keyless, free, no second
 cron, fully automatic. The `macro` model stays at weight 0 until the learner's significance gate promotes it
-(≥ 30 distinct dates, paired t < −2.6 vs naive). Never promote by hand or loosen the gate.
+(≥ 30 distinct dates, n_eff ≥ 5, paired t < −2.6 vs naive, or the Student-t 99.5% bar if stricter). Never promote by hand or loosen the gate.
 
 **Sri Lanka (CBSL) series** go to `LANKA_FACTORS` / `SRI_LANKA_META` in `lib/config.ts` instead, are fetched in
 `lib/sources/srilanka.ts` (+ `srilanka-xlsx.ts` for statistical-table .xlsx files) and feed the `lanka` model

@@ -19,12 +19,12 @@ async function Data() {
   await connection();
   const data = await getDashboard();
 
-  // Self-healing: if today's model run hasn't happened yet (cron missed, first deploy), run it
-  // after the response is sent, so the next visitor sees fresh forecasts.
+  // Self-healing: if today's cron run is missing or failed (first deploy, cron outage), run it after
+  // the response is sent. needsSync() waits for the cron's slot and has a cooldown (lib/sync.ts).
   if (hasDb()) {
     after(async () => {
       try {
-        if (await needsSync()) await runSync();
+        if (await needsSync()) await runSync({ page: true });
       } catch (e) {
         console.error("background sync failed", e);
       }

@@ -20,10 +20,15 @@ paths:
     horizon-normalised |ensemble log error| (n ≥ 30), recency-weighted with half-life `BAND_HALF_LIFE_DAYS` = 30
     (2026-11-14: USD→LKR coverage 67.2 → 70.7%, SGD→USD 83.5 → 81.6%, SGD→LKR 80.2 → 79.1%; 15 days over-reacted). Fallback: `Z80` × RMS of errors (n ≥ 10), else `Z80` × daily vol (60 days) × √h. (The old
     RMS band covered 92–94% at 2–14 days and was one width for a whole bucket.)
-  - Non-trading weekdays (`calendar.ts`, detected: Sunday's Wise point repeats Saturday's ~98% of the time):
+  - LKR pairs (`BAND_TREND_STRETCH` in config, c = 0.4): the side the 30-day trend points to is widened by
+    c × |mean daily log move| × h, one-sided (2026-11-14: USD→LKR coverage 70.7 → 75.2%). Band-only.
+  - Weights shrink by distinct target dates (not rows), non-finite errors are skipped, and the window is
+    [t − 180, t − 1]: the live run on t never has t's official point. Non-finite model outputs → anchor rate.
+  - Non-trading weekdays (`calendar.ts`, detected: Sunday's Wise point repeats Saturday's ~98% of the time;
+    released as soon as the weekday moved on 2 of its last 4 occurrences):
     forecasts don't move across them and their target dates are excluded from learning and accuracy.
   - Policy events (`events.ts`) add variance: band half-width = `sqrt(half² + Z80² · Σ (ratio−1)·base2)` over known
-    band-widening events whose move falls in (anchor, target] (`eventExtraVar`, applied in `engine.ts`). Events **never change the point forecast**. Details are in `events.md`.
+    band-widening events whose move falls in (anchor, target] (an event on the anchor day counts half) (`eventExtraVar`, applied in `engine.ts`). Events **never change the point forecast**. Details are in `events.md`.
 - **Shadow mode** (`SHADOW_MODELS` in `models.ts`, gate in `learning.ts`):
   - Every new model built on **external data** starts in `SHADOW_MODELS`. It runs and is scored daily, but it
     gets weight 0 and is left out of the pooled MAE (the shrinkage target), so the blend is identical to
@@ -31,8 +36,10 @@ paths:
   - **Every model except `naive` is gated, not just shadow ones** (the 365-day replay showed no classic model
     reliably beats the random walk, and ungated they made the ensemble worse at every horizon).
   - Promotion is automatic and per bucket. It needs **≥ 30 distinct target dates** in the window **and** a paired
-    t-test on per-date mean |error| vs `naive` with t < −2.6 (n_eff = dates / bucket mean horizon, because
-    neighbouring forecasts overlap; 2.6 = Bonferroni for ~10 candidates per bucket. Plain t < −2 promoted noise
+    t-test on per-date mean |error| vs `naive` with t < −`tBar(n_eff)` and n_eff ≥ 5 (n_eff = dates / bucket mean
+    horizon, because neighbouring forecasts overlap; `tBar` = max(2.6, Student-t 99.5% at n_eff − 1 df); 2.6 =
+    Bonferroni for ~10 candidates per bucket. With the normal 2.6 a 15–31d bucket (n_eff 1.4–8) promoted
+    `holt`/`drift`/`monthly_pattern` on noise until 2026-11-14. Plain t < −2 promoted noise
     for USD→LKR in May 2026 and made 2–7d 5% worse). Stored as `BucketStats.promoted`; the UI shows "not used" for a model that isn't promoted.
   - Count distinct dates, not rows. Long-horizon forecasts overlap: 60 rows at 15–31 days arrive within ~4 days
     and share a handful of targets. A row-count rule promoted `macro` on noise and worsened LKR 15–31d.

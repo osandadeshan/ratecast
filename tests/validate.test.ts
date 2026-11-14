@@ -35,6 +35,19 @@ test("validateHistory: checks the first new point against the last stored one", 
   assert.equal(ok.length, 0);
 });
 
+test("validateHistory: a large jump that holds for NEW_LEVEL_DAYS is a new level, not a bad point", async () => {
+  const { NEW_LEVEL_DAYS } = await import("@/lib/sources/validate");
+  const pts = [{ date: "2026-11-01", rate: 300 }];
+  for (let i = 0; i < NEW_LEVEL_DAYS + 2; i++) pts.push({ date: `2026-11-${String(i + 2).padStart(2, "0")}`, rate: 400 + i });
+  const { ok, rejected } = validateHistory("USDLKR", pts);
+  assert.equal(ok.length, pts.length);
+  assert.equal(rejected.length, 0);
+  // Shorter than that it stays rejected (a bad run of points that then reverts).
+  const short = validateHistory("USDLKR", [pts[0], ...pts.slice(1, NEW_LEVEL_DAYS), { date: "2026-11-20", rate: 301 }]);
+  assert.equal(short.rejected.length, NEW_LEVEL_DAYS - 1);
+  assert.equal(short.ok.at(-1)!.rate, 301);
+});
+
 test("validateLive", () => {
   assert.equal(validateLive("USDLKR", 332, { date: "2026-11-12", rate: 331 }), null);
   assert.match(validateLive("USDLKR", 33.2, { date: "2026-11-12", rate: 331 })!, /%/);

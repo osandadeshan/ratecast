@@ -79,6 +79,25 @@ export const MIN_PROMOTE_DATES = 30;
  * 10 candidates: z(1 − 0.05/10) ≈ 2.58, rounded to 2.6.
  */
 const T_BEATS = 2.6;
+/**
+ * The effective sample behind a long-horizon test is small (30 dates at 15–31 days ≈ 1.3 independent
+ * forecasts), and with so few the normal 2.6 promotes noise: the 2026-11-14 replay promoted holt, drift
+ * and monthly_pattern at 8–31 days right after warm-up on n_eff 1.3–3.2. So the bar is the Student-t
+ * value at the same tail probability (one-sided 0.5%, i.e. 5% over ~10 candidates) with n_eff − 1
+ * degrees of freedom, never below T_BEATS, and no test at all with n_eff < MIN_N_EFF.
+ */
+const MIN_N_EFF = 5;
+/** Student-t upper 0.5% critical values by degrees of freedom (df ≥ 120 → the normal value ≈ T_BEATS). */
+const T_CRIT_995: [number, number][] = [
+  [4, 4.604], [5, 4.032], [6, 3.707], [7, 3.499], [8, 3.355], [9, 3.25], [10, 3.169], [12, 3.055],
+  [15, 2.947], [20, 2.845], [25, 2.787], [30, 2.75], [40, 2.704], [60, 2.66], [120, 2.617],
+];
+/** The promotion bar for a paired test with effective sample nEff (exported for tests). */
+export function tBar(nEff: number): number {
+  const df = Math.floor(nEff) - 1;
+  for (const [d, v] of T_CRIT_995) if (df <= d) return Math.max(v, T_BEATS);
+  return T_BEATS;
+}
 /** Long-horizon errors arrive weeks late (stale regime), so only correct bias up to this horizon. */
 const MAX_BIAS_BUCKET = 7;
 const MIN_Q80_SAMPLES = 30;
@@ -130,6 +149,7 @@ export class ErrorIndex {
   }
 
   add(e: ErrorRecord) {
+    if (!Number.isFinite(e.logError)) return; // a NaN would poison every MAE and weight for 180 days
     const bucket = bucketOf(e.horizon);
     const key = `${bucket}|${e.model}`;
     let g = this.groups.get(key);
@@ -170,8 +190,10 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
   const gated = opts.gated ?? MODEL_NAMES.filter((m) => m !== "naive");
 
   // Target dates in the window, newest first, with their age in days (for the bias half-life).
+  // Starts at age 1: the live run on day t never has Wise's official point for t yet (only the
+  // provisional quote), so the replay and backtest mustn't learn from target t either.
   const window: { date: string; age: number }[] = [];
-  for (let age = 0; age < windowDays; age++) {
+  for (let age = 1; age <= windowDays; age++) {
     const date = addDays(asOf, -age);
     if (!nonTrading.includes(dowOf(date))) window.push({ date, age });
   }
@@ -227,13 +249,16 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
       const mean = sum / k;
       const sd = Math.sqrt(Math.max(sq / k - mean * mean, 0) * (k / (k - 1)));
       const nEff = k / BUCKET_MEAN_H[bucket];
+      lastNEff = nEff;
       return sd > 0 ? mean / (sd / Math.sqrt(nEff)) : null;
     };
+    let lastNEff = 0;
     const tStats: Record<string, number | null> = {};
     const beats = (a: string, b: string): boolean => {
+      lastNEff = 0;
       const t = pairedT(a, b);
       tStats[a] = t;
-      return t !== null && t < -T_BEATS;
+      return t !== null && lastNEff >= MIN_N_EFF && t < -tBar(lastNEff);
     };
 
     // Gate: a model is scored every day but only gets weight once it beats the random walk here.
@@ -251,7 +276,8 @@ export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}):
       } else if (pooled === null) {
         raw[m] = 1;
       } else {
-        const shrunk = ((mae[m] ?? pooled) * n[m] + pooled * SHRINK_MAE) / (n[m] + SHRINK_MAE);
+        // Shrink by distinct target dates, not rows: long-horizon rows overlap (31 rows per date).
+        const shrunk = ((mae[m] ?? pooled) * dates[m] + pooled * SHRINK_MAE) / (dates[m] + SHRINK_MAE);
         raw[m] = 1 / (shrunk + 1e-5) ** WEIGHT_POWER;
       }
     }

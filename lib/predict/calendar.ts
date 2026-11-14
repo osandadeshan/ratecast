@@ -9,14 +9,22 @@ const WEEKS = 26;
 const MIN_OBS = 12;
 const ZERO_MOVE = 1e-5; // |log move| below 0.001% counts as "did not move"
 const ZERO_SHARE = 0.9;
+/** A weekday stops being non-trading as soon as it moved on 2 of its last 4 occurrences (source change). */
+const RECENT_OBS = 4;
+const RECENT_MOVED = 2;
 
 /** Day of week, 0 = Sunday … 6 = Saturday (UTC, like every date in this app). */
 export const dowOf = (d: string) => new Date(parseISO(d)).getUTCDay();
 
-/** Weekdays whose daily move was ~0 in at least 90% of the last 26 weeks known at `anchor`. */
+/**
+ * Weekdays whose daily move was ~0 in at least 90% of the last 26 weeks known at `anchor`, unless the
+ * weekday moved on 2 of its last 4 occurrences (then the source changed, and waiting for the 26-week
+ * share to fall would keep the forecast frozen on a trading day for months).
+ */
 export function detectNonTradingDow(rates: Map<string, number>, anchor: string): number[] {
   const n = new Array<number>(7).fill(0);
   const zero = new Array<number>(7).fill(0);
+  const recent: boolean[][] = [[], [], [], [], [], [], []]; // per weekday, oldest first: moved?
   let prev = rates.get(addDays(anchor, -WEEKS * 7));
   for (let i = WEEKS * 7 - 1; i >= 0; i--) {
     const d = addDays(anchor, -i);
@@ -24,11 +32,18 @@ export function detectNonTradingDow(rates: Map<string, number>, anchor: string):
     if (v && prev) {
       const w = dowOf(d);
       n[w]++;
-      if (Math.abs(Math.log(v / prev)) < ZERO_MOVE) zero[w]++;
+      const still = Math.abs(Math.log(v / prev)) < ZERO_MOVE;
+      if (still) zero[w]++;
+      recent[w].push(!still);
     }
     prev = v;
   }
-  return [0, 1, 2, 3, 4, 5, 6].filter((w) => n[w] >= MIN_OBS && zero[w] / n[w] >= ZERO_SHARE);
+  return [0, 1, 2, 3, 4, 5, 6].filter(
+    (w) =>
+      n[w] >= MIN_OBS &&
+      zero[w] / n[w] >= ZERO_SHARE &&
+      recent[w].slice(-RECENT_OBS).filter(Boolean).length < RECENT_MOVED,
+  );
 }
 
 /**

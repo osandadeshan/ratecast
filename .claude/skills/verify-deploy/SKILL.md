@@ -12,7 +12,8 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    - `db: false` means Neon isn't connected. Fix in Vercel: Storage → Neon → connect to the project, then redeploy.
    - `live` null / `src: "none"` means Wise is blocking Vercel's IPs. Check `sync_runs.message` for
      `live quote failed`. A fallback would be ExchangeRate-API/Currency-API (already fetched as cross-checks).
-   - `sync: null` means the first sync hasn't run. Load the page once (it triggers via `after()`), wait ~60 s, retry.
+   - `sync: null` means the first sync hasn't run. Load the page once after 10:30 SGT (it triggers via `after()`;
+     earlier visits leave it to the cron), wait ~60 s, retry.
    - `sync: "error"` means reading the message. It's in the JSON as `.lastSync.message`.
 3. **Cron auth.** `curl -s -o /dev/null -w "%{http_code}\n" $URL/api/cron/sync` must be **401** (proves
    `CRON_SECRET` is set). Don't call it with the secret unless the user provides it and asks for a manual run.
@@ -33,7 +34,7 @@ Ask for the production URL if you don't have it. Call it `$URL`.
    - The first sync takes ~1 min longer: it downloads 3 yearly Treasury CSVs, one at a time, and home.treasury.gov
      can take ~20 s each. `treasury` failing with a timeout once is OK; it should be ok after the next run.
    - Every model except the random walk shows "not used" in the weights table until it passes the significance
-     gate (t < −2.6 vs naive). As of 2026-11-14 none has (and the bias correction is off in every bucket), so the forecast equals today's rate. That's by design.
+     gate (t < −2.6 vs naive, stricter Student-t bar for small samples). As of 2026-11-14 none has (and the bias correction is off in every bucket), so the forecast equals today's rate. That's by design.
    - **Sri Lanka series.** The log must have `lk_usd_spot`, `lk_sgd_ind`, `lk_opr`, `lk_tbill3m`, `lk_remit`,
      `lk_tourism`, `lk_ccpi_yoy` lines, and `source_health` rows `cbsl-fx`, `cbsl-rates`, `cbsl-external`,
      `cbsl-prices` should be ok. `.macro` on the dashboard lists them; monthly series are 1–2 months old, which

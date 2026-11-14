@@ -6,14 +6,19 @@ import {
   LEARNING_WINDOW_DAYS,
   MAX_HORIZON,
   MODEL_VERSION,
+  PAGE_OUTCOME_FETCHES,
+  PAGE_SYNC_COOLDOWN_MIN,
+  PAGE_SYNC_FROM_SGT,
   PREDICT_ORDER,
   PRUNE_MODELS_AFTER_DAYS,
   REPLAY_BUDGET_MS,
   BACKTEST_BUDGET_MS,
+  SYNC_LOCK_MINUTES,
   TARGETS,
   type Target,
 } from "./config";
-import { addDays, todayISO } from "./dates";
+import { randomUUID } from "node:crypto";
+import { addDays, timeHM, todayISO } from "./dates";
 import { db, ensureSchema } from "./db";
 import { type PredictionRow } from "./predict/engine";
 import { OUTCOME_KINDS, type EventRecord } from "./predict/events";
@@ -37,41 +42,83 @@ export interface SyncResult {
 
 const LOCK_ID = 1;
 
-async function acquireLock(): Promise<boolean> {
+/** Returns this run's lock token, or null if another live run holds the lock. */
+async function acquireLock(): Promise<string | null> {
+  const token = randomUUID();
   const rows = await db()`
-    INSERT INTO sync_lock (id, locked_at) VALUES (${LOCK_ID}, now())
-    ON CONFLICT (id) DO UPDATE SET locked_at = now()
-      WHERE sync_lock.locked_at < now() - interval '5 minutes'
+    INSERT INTO sync_lock (id, locked_at, token) VALUES (${LOCK_ID}, now(), ${token})
+    ON CONFLICT (id) DO UPDATE SET locked_at = now(), token = EXCLUDED.token
+      WHERE sync_lock.locked_at < now() - make_interval(mins => ${SYNC_LOCK_MINUTES})
     RETURNING id`;
-  return rows.length > 0;
+  return rows.length > 0 ? token : null;
 }
 
-async function releaseLock() {
-  await db()`DELETE FROM sync_lock WHERE id = ${LOCK_ID}`;
+/** Only releases the lock if this run still holds it (an expired lock may have been taken over). */
+async function releaseLock(token: string) {
+  await db()`DELETE FROM sync_lock WHERE id = ${LOCK_ID} AND token = ${token}`;
 }
 
-/** True if no successful sync has happened yet for today's date. */
-export async function needsSync(): Promise<boolean> {
+/**
+ * Should a page visit start a sync? Only to self-heal a missed or failed cron run: not before
+ * PAGE_SYNC_FROM_SGT (the 09:30 SGT cron makes the day's forecast from complete data), not if
+ * today already has an ok run, and not within PAGE_SYNC_COOLDOWN_MIN of any run's start (so a
+ * failing source can't turn every page view into a 60 s sync).
+ */
+export async function needsSync(now = new Date()): Promise<boolean> {
   await ensureSchema();
-  const today = todayISO();
+  const today = todayISO(now);
+  if (timeHM(now) < PAGE_SYNC_FROM_SGT) return false;
   const rows = await db()`
-    SELECT 1 FROM sync_runs WHERE run_date = ${today} AND status = 'ok' LIMIT 1`;
-  return rows.length === 0;
+    SELECT
+      bool_or(status = 'ok' AND run_date = ${today}) AS done,
+      max(started_at) > now() - make_interval(mins => ${PAGE_SYNC_COOLDOWN_MIN}) AS recent
+    FROM sync_runs WHERE started_at > now() - interval '2 days'`;
+  return !rows[0]?.done && !rows[0]?.recent;
 }
 
-export async function runSync(opts: { backtestBudgetMs?: number } = {}): Promise<SyncResult> {
-  const t0 = Date.now();
+export async function runSync(
+  opts: {
+    backtestBudgetMs?: number;
+    /** Page-triggered: read fewer statements, skip the backtest if time is short (Vercel's 60 s). */
+    page?: boolean;
+    /** Cron: if a page-triggered run holds the lock, wait for it (up to this long) instead of skipping. */
+    waitForLockMs?: number;
+  } = {},
+): Promise<SyncResult> {
+  let t0 = Date.now();
   const log: string[] = [];
   const today = todayISO();
   await ensureSchema();
 
-  if (!(await acquireLock())) {
+  let token = await acquireLock();
+  while (!token && opts.waitForLockMs && Date.now() - t0 < opts.waitForLockMs) {
+    await new Promise((r) => setTimeout(r, 5_000));
+    token = await acquireLock();
+  }
+  if (!token) {
     return { status: "skipped", runDate: today, log: ["another sync is running"], ms: Date.now() - t0 };
   }
+  // The waiting run may have finished today's work already.
+  if (opts.waitForLockMs && Date.now() - t0 > 1_000) {
+    const [done] = await db()`SELECT 1 FROM sync_runs WHERE run_date = ${today} AND status = 'ok' LIMIT 1`;
+    if (done) {
+      await releaseLock(token);
+      return { status: "skipped", runDate: today, log: ["today's sync finished while waiting"], ms: Date.now() - t0 };
+    }
+  }
   const sql = db();
-  const [run] = await sql`INSERT INTO sync_runs (run_date, model_version) VALUES (${today}, ${MODEL_VERSION}) RETURNING id`;
+  let runId: number | null = null;
+  t0 = Date.now(); // budgets count from when this run got the lock, not from any wait for it
 
   try {
+    // A run killed by the platform (timeout) never reaches its UPDATE: close such rows so they don't
+    // show as "running" forever. The lock expiry bounds how long a live run can take.
+    await sql`UPDATE sync_runs SET status = 'error', finished_at = now(),
+                message = coalesce(message, '') || 'killed before it finished (platform time limit?)'
+              WHERE status = 'running' AND started_at < now() - make_interval(mins => ${SYNC_LOCK_MINUTES})`;
+    const [run] = await sql`INSERT INTO sync_runs (run_date, model_version) VALUES (${today}, ${MODEL_VERSION}) RETURNING id`;
+    runId = run.id;
+
     // 1. External market data (shared by both currencies)
     const [{ n: basketCount }] = await sql`SELECT count(*)::int AS n FROM market_data WHERE series = 'usd_basket'`;
     const basketStart = addDays(today, basketCount < 200 ? -420 : -45);
@@ -93,7 +140,7 @@ export async function runSync(opts: { backtestBudgetMs?: number } = {}): Promise
 
     // 1b. Policy event calendars (Fed, CBSL). Failures are logged + recorded, never fatal.
     const okSources = await ingestEvents(log);
-    await classifyOutcomes(today, log, okSources);
+    await classifyOutcomes(today, log, okSources, opts.page ? PAGE_OUTCOME_FETCHES : undefined);
 
     // 2. Per-currency ingest
     for (const target of TARGETS) {
@@ -116,7 +163,7 @@ export async function runSync(opts: { backtestBudgetMs?: number } = {}): Promise
 
     // 4b. Once per model version: an in-memory backtest of this code over the last year, compared with
     // the previous version. Only when the replay is complete and there is time left; else next run.
-    if (!partial) await backtestVersion(today, log, t0 + (opts.backtestBudgetMs ?? BACKTEST_BUDGET_MS));
+    if (!partial) await backtestVersion(today, log, t0 + (opts.backtestBudgetMs ?? BACKTEST_BUDGET_MS), opts.page);
 
     // 5. Housekeeping. Final forecasts and the baseline are the permanent record and are never deleted;
     // the other models' rows (only needed for learning, 180-day window) go after ~1.5 years.
@@ -126,25 +173,38 @@ export async function runSync(opts: { backtestBudgetMs?: number } = {}): Promise
 
     // 'partial' keeps needsSync() true, so the next page visit or cron run continues the replay.
     const status = partial ? "partial" : "ok";
-    await sql`UPDATE sync_runs SET status = ${status}, finished_at = now(), message = ${log.join("\n")} WHERE id = ${run.id}`;
+    await sql`UPDATE sync_runs SET status = ${status}, finished_at = now(), message = ${log.join("\n")} WHERE id = ${runId}`;
     return { status, runDate: today, log, ms: Date.now() - t0 };
   } catch (e) {
     const msg = (e as Error).stack ?? String(e);
     log.push(`ERROR: ${msg}`);
-    await sql`UPDATE sync_runs SET status = 'error', finished_at = now(), message = ${log.join("\n")} WHERE id = ${run.id}`;
+    if (runId !== null) {
+      await sql`UPDATE sync_runs SET status = 'error', finished_at = now(), message = ${log.join("\n")} WHERE id = ${runId}`;
+    }
     return { status: "error", runDate: today, log, ms: Date.now() - t0 };
   } finally {
-    await releaseLock();
+    await releaseLock(token);
   }
 }
 
+/**
+ * Series whose published values get revised later (CBSL monthly tables are provisional). The first
+ * value seen is kept, so the replay and backtest see what a live run would have had on that day.
+ */
+const FIRST_SEEN_SERIES = new Set(["lk_remit", "lk_tourism", "lk_ccpi_yoy", "lk_opr", "lk_tbill3m"]);
+
 async function upsertMarket(rows: { series: string; date: string; value: number }[]) {
-  if (!rows.length) return;
+  // One row per (series, date): a duplicate inside one INSERT ... ON CONFLICT fails the whole batch.
+  const unique = [...new Map(rows.map((r) => [`${r.series}|${r.date}`, r])).values()];
+  if (!unique.length) return;
   const sql = db();
-  for (let i = 0; i < rows.length; i += 1000) {
-    await sql`
-      INSERT INTO market_data ${sql(rows.slice(i, i + 1000), "series", "date", "value")}
-      ON CONFLICT (series, date) DO UPDATE SET value = EXCLUDED.value`;
+  for (const keepFirst of [true, false]) {
+    const part = unique.filter((r) => FIRST_SEEN_SERIES.has(r.series) === keepFirst);
+    for (let i = 0; i < part.length; i += 1000) {
+      const chunk = sql(part.slice(i, i + 1000), "series", "date", "value");
+      if (keepFirst) await sql`INSERT INTO market_data ${chunk} ON CONFLICT (series, date) DO NOTHING`;
+      else await sql`INSERT INTO market_data ${chunk} ON CONFLICT (series, date) DO UPDATE SET value = EXCLUDED.value`;
+    }
   }
 }
 
@@ -175,12 +235,19 @@ async function ingestEvents(log: string[]): Promise<Set<string>> {
     outcome: e.outcome ?? null,
   }));
   if (rows.length) {
-    await sql`
-      INSERT INTO events ${sql(rows, "kind", "event_date", "known_since", "source", "title", "url", "outcome")}
-      ON CONFLICT (kind, event_date) DO UPDATE SET
-        known_since = LEAST(events.known_since, EXCLUDED.known_since),
-        source = EXCLUDED.source, title = EXCLUDED.title, url = EXCLUDED.url,
-        outcome = COALESCE(events.outcome, EXCLUDED.outcome), updated_at = now()`;
+    // A scraper must never fail the sync, not even with a value Postgres rejects.
+    try {
+      await sql`
+        INSERT INTO events ${sql(rows, "kind", "event_date", "known_since", "source", "title", "url", "outcome")}
+        ON CONFLICT (kind, event_date) DO UPDATE SET
+          known_since = LEAST(events.known_since, EXCLUDED.known_since),
+          source = EXCLUDED.source, title = EXCLUDED.title, url = EXCLUDED.url,
+          outcome = COALESCE(events.outcome, EXCLUDED.outcome), updated_at = now()`;
+    } catch (e) {
+      log.push(`events: storing failed: ${(e as Error).message}`);
+      await recordHealth("events-store", 0, (e as Error).message);
+      return new Set();
+    }
   }
   for (const r of results) await recordHealth(r.source, r.events.length, r.error, r.note);
   log.push(
@@ -273,7 +340,7 @@ async function loadFactors(): Promise<Record<string, Map<string, number>>> {
 }
 
 /** Read each past announcement's own statement and store what was decided (cut / hold / hike). */
-async function classifyOutcomes(today: string, log: string[], okSources: Set<string>) {
+async function classifyOutcomes(today: string, log: string[], okSources: Set<string>, maxFetches?: number) {
   const sql = db();
   const pending = (await loadEvents()).filter(
     // Only decisions have an outcome; data releases (us_cpi, us_jobs) are band-only.
@@ -283,7 +350,7 @@ async function classifyOutcomes(today: string, log: string[], okSources: Set<str
     await recordHealth("outcomes", 0); // nothing to do is healthy, not stale
     return;
   }
-  const { results, missing, error } = await fetchOutcomes(pending.reverse()); // newest first
+  const { results, missing, error } = await fetchOutcomes(pending.reverse(), maxFetches); // newest first
   for (const r of results) {
     await sql`UPDATE events SET outcome = ${r.outcome}, updated_at = now()
               WHERE kind = ${r.kind} AND event_date = ${r.eventDate} AND outcome IS NULL`;
@@ -452,6 +519,8 @@ async function loadErrors(target: Target, since: string): Promise<ErrorRecord[]>
  * same day keeps the first run's forecast. origin says whether the row was made live or replayed.
  */
 async function insertPredictions(target: Target, rows: PredictionRow[], origin: "live" | "replay") {
+  // Drop anything non-finite (a NaN would poison every later error statistic).
+  rows = rows.filter((r) => Number.isFinite(r.predicted) && r.predicted > 0);
   if (!rows.length) return;
   const sql = db();
   const data = rows.map((r) => ({
@@ -469,10 +538,14 @@ async function insertPredictions(target: Target, rows: PredictionRow[], origin: 
   const cols = [
     "currency", "made_on", "target_date", "horizon", "model", "predicted", "lower80", "upper80", "origin", "model_version",
   ] as const;
-  for (let i = 0; i < data.length; i += 1000) {
-    const chunk = sql(data.slice(i, i + 1000), ...cols);
-    await sql`INSERT INTO predictions ${chunk} ON CONFLICT (currency, made_on, target_date, model) DO NOTHING`;
-  }
+  // One transaction: a run killed half-way (platform time limit) leaves either all of a batch or none,
+  // never a half-written day that write-once would then keep forever.
+  await sql.begin(async (tx) => {
+    for (let i = 0; i < data.length; i += 1000) {
+      const chunk = tx(data.slice(i, i + 1000), ...cols);
+      await tx`INSERT INTO predictions ${chunk} ON CONFLICT (currency, made_on, target_date, model) DO NOTHING`;
+    }
+  });
 }
 
 /** Returns true if the replay ran out of time (the next run continues from the first missing day). */
@@ -573,7 +646,7 @@ async function predictCurrency(target: Target, today: string, log: string[], dea
   }
   await sql`
     INSERT INTO model_stats (currency, as_of, stats) VALUES (${target}, ${today}, ${sql.json(stats as never)})
-    ON CONFLICT (currency, as_of) DO UPDATE SET stats = EXCLUDED.stats`;
+    ON CONFLICT (currency, as_of) DO NOTHING`; // like the forecast: the stats that made it are kept
   const tomorrow = rows.find((r) => r.model === "ensemble" && r.horizon === 1);
   log.push(`${target}: forecast ${rows.length} rows, tomorrow ≈ ${tomorrow?.predicted.toFixed(4)}`);
   return partial;
@@ -584,9 +657,15 @@ async function predictCurrency(target: Target, today: string, log: string[], dea
  * last year in memory and stores the scores and the comparison with the previous version. Never
  * fails the sync, and stores nothing if it runs out of time (the next run tries again).
  */
-async function backtestVersion(today: string, log: string[], deadline: number) {
+async function backtestVersion(today: string, log: string[], deadline: number, page = false) {
   const sql = db();
   try {
+    // The backtest takes ~30 s; a page-triggered run only starts it with that much time left.
+    if (page && deadline - Date.now() < 35_000) {
+      log.push(`backtest of ${MODEL_VERSION}: postponed (page-triggered run, not enough time)`);
+      await sql`INSERT INTO model_versions (version, first_run) VALUES (${MODEL_VERSION}, ${today}) ON CONFLICT DO NOTHING`;
+      return;
+    }
     await sql`INSERT INTO model_versions (version, first_run) VALUES (${MODEL_VERSION}, ${today}) ON CONFLICT DO NOTHING`;
     const [row] = await sql`SELECT backtest_on FROM model_versions WHERE version = ${MODEL_VERSION}`;
     if (row?.backtest_on) return;

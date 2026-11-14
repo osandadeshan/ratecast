@@ -31,7 +31,7 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
-| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 88 tests) |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 94 tests) |
 | Backtest current code (read-only) | `npm run backtest` (~30 s; same code path as the sync) |
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
@@ -124,7 +124,7 @@ vercel.json                   Functions in sin1 (Singapore, next to Neon); cron 
      remittances / tourism 45 (monthly tables are published 1–2 months late).
    - **Every model except `naive` is gated** (`learning.ts`): it gets weight 0 in a horizon bucket until it has
      ≥ 30 distinct target dates there and beats the random walk by a paired t-test on per-date |error|
-     (overlap-adjusted n, t < −2.6, Bonferroni for ~10 candidates). The bias correction passes the same
+     (overlap-adjusted n_eff ≥ 5, t < −2.6 or the stricter Student-t 99.5% bar for small n_eff, Bonferroni for ~10 candidates). The bias correction passes the same
      test against `blend`. Promotion is automatic (`BucketStats.promoted`). `SHADOW_MODELS` (`macro`, `news`,
      `lanka`, `cross`, `cbsl_gap`) only marks models built on external data for the UI. Never loosen the bar to get a model in.
    - Non-trading weekdays (Sunday's Wise point repeats Saturday's) are detected from the data

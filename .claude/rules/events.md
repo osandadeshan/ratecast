@@ -37,7 +37,7 @@ paths:
 | source | URL | parse | fragility |
 |---|---|---|---|
 | `fed-page` | federalreserve.gov/monetarypolicy/fomccalendars.htm | HTML → text tokens. Heading `YYYY FOMC Meetings`, then a month token (`June`, `Apr/May`) followed by days (`16-17*`). Decision = last day. Cross-month `Apr/May 30-1` → 2nd month. Skips `(notation vote)`/`(cancelled)`. `(unscheduled)` is kept. | Layout change gives 0 rows → error. Covers ~5 past years + next year. |
-| `fed-json` | federalreserve.gov/json/calendar.json | `type: "FOMC"` + title `FOMC Meeting` (case varies), `month` + last number of `days`. | Fallback/redundancy. Covers 2017 → end of the current year only. |
+| `fed-json` | federalreserve.gov/json/calendar.json | `type: "FOMC"` + title `FOMC Meeting` (case varies), `month` + last number of `days` (a wrapped range `30-1` moves to the next month). | Fallback/redundancy: only dates `fed-page` lacks are kept (the note gives the parsed count). Covers 2017 → end of the current year only. |
 | `cbsl-mpr` | cbsl.gov.lk/en/press/press-releases/monetary-policy-review | Past review dates from PDF file names `press_YYYYMMDD_Monetary_Policy_Review_No_N_YYYY_*.pdf`. Next date from the **latest PDF** via `pdfText()`: `next regular statement … will be on D Month YYYY`, matched on whitespace-free text (`compact()`). | The year's last statement (Nov/Dec) names no next date → `note`, not error. Missing next date in other months → error. PDF text uses odd spacing, so always match compacted text. |
 | `bls` | bls.gov/schedule/YYYY/home.htm (years y−2 … y+1) | `<tr>` rows: `date-cell` "Weekday, Month D, YYYY" + `desc-cell` `<strong>` release name. Exact names only: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (not "… Average Price", "State Employment …"). | A missing current year or 0 rows → error. A missing future year → note "schedule not published yet". |
 | `cbsl-rss` | cbsl.gov.lk/en/rss.xml | Items whose title matches the IMF regex (`IMF`, `International Monetary Fund`, `Extended Fund Facility`, `EFF`, `staff-level agreement`), dated in `Asia/Colombo`. | Only ~10 latest items, so it only collects going forward (daily polling is enough). |
@@ -51,10 +51,12 @@ paths:
 
 ## `known_since` (no-look-ahead gate)
 The replay at day `t` only uses events with `known_since <= t`. The rules:
-- FOMC scheduled: `event_date − 300 d` (the Fed publishes its schedule more than a year ahead). Unscheduled: the event day.
+- FOMC scheduled: `event_date − 300 d` (the Fed publishes its schedule more than a year ahead). Unscheduled: the day after (it is announced the same day, after the 09:30 SGT sync).
 - CBSL past review: the previous review's date if it was ≤ 120 days earlier (each statement announces the
-  next), else `event − 56 d`. Scheduled next date: the latest statement's date.
-- IMF (RSS): the event day (recorded after the fact).
+  next); else, for a Jan–Apr review (on CBSL's yearly schedule), `event − 56 d`; else the event day.
+  Scheduled next date: the latest statement's date.
+- IMF (RSS): the day after the event (recorded after the fact; the press release comes after the sync).
+- Dates that don't exist (e.g. `2026-02-30` in a feed) are dropped by every parser (`isValidISO`).
 - BLS (`blsKnownSince`): Dec 1 of the previous year if the day is in the usual range (CPI days 10–15, jobs days
   1–10: BLS publishes the next year's schedule in the autumn), else `date − 7` (a rescheduled release, e.g.
   after the Oct–Nov 2025 shutdown).
@@ -109,7 +111,7 @@ The replay at day `t` only uses events with `known_since <= t`. The rules:
 
 ## Verify
 ```bash
-npm run sync | grep events:     # "events: N rows · fed-page 56, fed-json 63, cbsl-mpr 13, cbsl-rss 0, bls N"
+npm run sync | grep events:     # "events: N rows · fed-page 56, fed-json 31, cbsl-mpr 13, cbsl-rss 0, bls N"
 curl -s localhost:3123/api/dashboard | jq '.events | {upcoming, health}'
 docker exec ratecast-pg psql -U postgres -d rates -c "SELECT * FROM source_health;" \
   -c "SELECT kind, count(*), min(event_date), max(event_date) FROM events GROUP BY 1;" \

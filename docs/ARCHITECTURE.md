@@ -4,7 +4,7 @@
 
 ```
                     ┌──────────────── daily 01:30 UTC (Vercel Cron) ─────────────────┐
-                    │        or first page view of the day via after() (self-heal)   │
+                    │     or a page view from 10:30 SGT via after() (self-heal)      │
                     ▼                                                                │
  Wise rates/history ─┐                                                               │
  Wise comparisons ───┤   ┌────────────┐   ┌──────────┐   ┌────────┐   ┌──────────┐   │
@@ -26,7 +26,12 @@
 
 ## Sync run (`lib/sync.ts → runSync`)
 
-1. **Lock.** One row in `sync_lock`. A concurrent run returns `skipped`, and the lock expires after 5 min.
+1. **Lock.** One row in `sync_lock` with a random token; only the owner's token releases it, and an expired row
+   (`SYNC_LOCK_MINUTES` = 6, longer than the cron's 300 s limit) can be taken over. A concurrent page run returns
+   `skipped`; the cron waits up to 70 s for the lock, then skips if today's run already finished ok. Leftover
+   `running` rows from killed runs are closed as `error`. A page-triggered run (`needsSync()`: from
+   `PAGE_SYNC_FROM_SGT` = 10:30, no `ok` run today, no run started in the last 15 min) reads at most 4 outcome
+   statements and postpones the version backtest if less than 35 s are left.
 2. **Market data.** Frankfurter `USD → EUR, JPY, GBP, CNY` time series → `usd_basket` = mean of the logs
    (rises when the USD strengthens): 420 days while there are < 200 rows, otherwise 45. Cross-check "today"
    rates from ExchangeRate-API and Currency-API → `xc:<pair>:<source>` (USD→LKR is derived from each source's
@@ -99,20 +104,26 @@
 
 ## Learning (`lib/predict/learning.ts`)
 
-For each horizon bucket b ∈ {1, 3, 7, 14, 31}, over evaluated errors with target date in (t − 180, t], skipping
-detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturday's):
+For each horizon bucket b ∈ {1, 3, 7, 14, 31}, over evaluated errors with target date in [t − 180, t − 1] (never t itself: the live run on day t only has a
+provisional quote for t, so replay and backtest must not learn from it either), skipping non-finite errors and
+detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturday's ≥ 90% of 26 weeks; a
+weekday is released as soon as it moved on 2 of its last 4 occurrences):
 
-- `MAE_m` = mean |log error| of model m. Shrunk: `(n·MAE_m + 10·MAE_pooled)/(n + 10)`.
+- `MAE_m` = mean |log error| of model m. Shrunk by distinct target dates d_m (rows overlap at long horizons):
+  `(d_m·MAE_m + 10·MAE_pooled)/(d_m + 10)`.
 - `w_m ∝ 1 / MAE_shrunk^4`, normalised. With no data, only `naive` has weight (every other model starts
   unpromoted, see below).
-- `blend = Σ w_m · f_m` (log space).
+- `blend = Σ w_m · f_m` (log space), skipping models with w = 0. A non-finite model output is replaced by the
+  anchor rate (random walk) before blending or storing.
 - `bias` = exponentially recency-weighted (half-life 14 days) mean log error of `blend`, × n/(n + 15).
 - `blend_bc = blend − bias` is always stored, so its accuracy can be measured.
 - `ensemble = blend − bias · biasOn`, where `biasOn = 1` iff b ≤ 7 and `blend_bc` beats `blend` by the paired test below.
 - **Every model except `naive` is gated** (`SHADOW_MODELS` only labels the external-data ones in the UI). A model
   gets `w = 0` in a bucket until **promoted**: scored on ≥ 30 *distinct* target dates in the window and a paired
-  t-test on per-date mean |error| vs `naive` gives t < −2.6, with n_eff = dates / bucket mean horizon (neighbouring
-  forecasts overlap). 2.6 ≈ Bonferroni for ~10 candidates per bucket at 5% family-wise. Unpromoted models are also left out of `MAE_pooled`, so they can't
+  t-test on per-date mean |error| vs `naive` gives t < −`tBar(n_eff)`, with n_eff = dates / bucket mean horizon (neighbouring
+  forecasts overlap) and n_eff ≥ 5. `tBar` = max(2.6, Student-t 99.5% quantile at n_eff − 1 df): 2.6 ≈ Bonferroni for ~10
+  candidates per bucket at 5% family-wise, and the t quantile keeps a 30-date 15–31d bucket (n_eff ≈ 1.4–8) from
+  promoting on noise (the normal 2.6 promoted `holt`/`drift`/`monthly_pattern` that way until 2026-11-14). Unpromoted models are also left out of `MAE_pooled`, so they can't
   shift the other weights. The flag is stored per bucket in `BucketStats.promoted` and is re-evaluated every
   day, so a model can be promoted and demoted automatically. Distinct dates, not raw counts: long-horizon
   forecasts overlap heavily (17 horizons hit the same few target dates), and a first rule of "≥ 60 forecasts"
@@ -120,7 +131,9 @@ detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturd
 - 80% band: half-width `q80 · √(h / meanH_b)`, where q80 = empirical 80th percentile of the bucket's |ensemble log
   error| normalised to the bucket's mean horizon (n ≥ 30), each error weighted by 0.5^(target age / 30 days)
   (`BAND_HALF_LIFE_DAYS`, so the band follows a change of regime within weeks); fallback 1.2816 × (RMS of the
-  bucket's ensemble log errors if n ≥ 10, else 60-day daily vol × √h). Event variance is added in quadrature (see below). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
+  bucket's ensemble log errors if n ≥ 10, else 60-day daily vol × √h). Event variance is added in quadrature (see below). **LKR pairs** (`BAND_TREND_STRETCH`, c = 0.4): the side the
+  30-day trend points to gets an extra `c · |mean daily log move over 30 days| · h` (one-sided; LKR errors grow
+  faster than √h in a trend). Across a non-trading day the forecast and band are frozen. The point forecast never includes events.
 
 ## Macro factors (`lib/sources/macro.ts`)
 
@@ -175,11 +188,11 @@ BLS schedule pages ────┘
 
 | source key | what | parser | `known_since` |
 |---|---|---|---|
-| `fed-page` | FOMC page: "YYYY FOMC Meetings" sections, history from 2021 and next year's schedule | `parseFomcPage`: month token (`June`, `Apr/May`) + days token (`16-17*`); decision = last day; skips notation votes/cancelled | event − 300 days (schedule is published > 1 year ahead); unscheduled meetings = event date |
-| `fed-json` | Fed calendar JSON, `type: "FOMC"`, title `FOMC Meeting` (2017 → this year) | `parseFomcJson` | same as above |
-| `cbsl-mpr` | CBSL Monetary Policy Review list: date from each PDF name `press_YYYYMMDD_Monetary_Policy_Review_…pdf` | `parseCbslList` | previous review's date if it is at most 120 days earlier (each statement names the next), else event − 56 days |
+| `fed-page` | FOMC page: "YYYY FOMC Meetings" sections, history from 2021 and next year's schedule | `parseFomcPage`: month token (`June`, `Apr/May`) + days token (`16-17*`); decision = last day; skips notation votes/cancelled | event − 300 days (schedule is published > 1 year ahead); unscheduled meetings = the day after |
+| `fed-json` | Fed calendar JSON, `type: "FOMC"`, title `FOMC Meeting` (2017 → this year) | `parseFomcJson` (a wrapped day range like `30-1` moves to the next month); only meetings `fed-page` doesn't list are kept, and the note says how many it parsed | same as above |
+| `cbsl-mpr` | CBSL Monetary Policy Review list: date from each PDF name `press_YYYYMMDD_Monetary_Policy_Review_…pdf` | `parseCbslList` | previous review's date if it is at most 120 days earlier (each statement names the next), else event − 56 days for a Jan–Apr review (yearly schedule), else the event date |
 | `cbsl-mpr` (next) | the latest review PDF: "The release of the next regular statement … will be on 20 November 2026" | `pdfText` (built-in `node:zlib`, no dependency) + `parseCbslNextDate` on whitespace-free text | the latest review's date |
-| `cbsl-rss` | CBSL press releases whose titles mention the IMF / EFF / staff-level agreement | `parseCbslRss`, dated in Asia/Colombo | event date (after the fact only) |
+| `cbsl-rss` | CBSL press releases whose titles mention the IMF / EFF / staff-level agreement | `parseCbslRss`, dated in Asia/Colombo | the day after the event (after the fact only) |
 | `bls` | BLS release schedule `bls.gov/schedule/YYYY/home.htm`, years y−2 … y+1: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (exact names) | `parseBlsSchedule` (`date-cell` + `desc-cell` rows) | Dec 1 of the previous year if the day is in the usual range (CPI 10–15, jobs 1–10), else date − 7 (rescheduled release) |
 
 Rows are de-duplicated on `(kind, event_date)` and upserted with `known_since = LEAST(old, new)`. `kind` values
@@ -200,7 +213,8 @@ get an outcome.
   event (needs ≥ 60 samples), so display-only kinds leave the band exactly as it is without them. For each kind, with n events whose window closed by `asOf` (E+1 ≤ asOf):
   `ratio = (Σ move² + 6·base2) / (n + 6) / base2`, floored at 1, and forced to 1 when n < 4.
 - `eventExtraVar(events, stats, anchor, target)`: for each event of a widening kind known at the anchor (`known_since ≤ anchor`)
-  with `anchor ≤ E` and `E+1 ≤ target`, add `(ratio − 1) · base2` once. The engine sets
+  with `anchor ≤ E` and `E+1 ≤ target`, add `(ratio − 1) · base2` once (half of it if E = anchor: the E−1 → E
+  part of the move is already in the anchor rate). The engine sets
   `σ' = √(σ² + extra)`. Each event is counted once per forecast row however long the horizon is.
 - Result: horizons after an event get a wider band; horizons before it, and the point forecast, are unchanged.
 - The ratios are saved in `model_stats.stats.events` for transparency and shown on the card as
@@ -262,6 +276,9 @@ outcome (`COALESCE(events.outcome, EXCLUDED.outcome)`).
 - Dashboard: `.versions` (last 10) and `.learningLog` (last 30) feed the "Model versions and learning log" card.
 - Stored so far: `2026.11.13` (skill USD 1.0000 / USDLKR 1.0009 / LKR 0.9930) and `2026.11.14` (broad dollar
   index, `arima`, recency-weighted band, display-only CPI/jobs: 1.0000 / 1.0000 / 0.9934, "same" for all three).
+  `2026.11.14.2` (Student-t gate, finite guards, trend-side band for LKR pairs, anchor-day event half,
+  faster weekday release): 1.0000 / 1.0000 / 1.0000; coverage 81.5% / 75.2% / 83.0%. LKR is "worse" than
+  `2026.11.14`: the stricter gate dropped noise promotions at 15–31 days (see docs/CONTEXT.md).
   `learning_log` is still empty: nothing has been promoted or demoted in a live run yet.
 
 ## Live quote (`lib/sources/wise.ts`)

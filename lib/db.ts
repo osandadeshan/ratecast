@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS events (
 -- Filled automatically after the announcement from the statement itself; 'unclear' if unparsable.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS outcome text;
 
+-- known_since rules tightened 2026-11-14 (after-the-fact events count from the next day; a CBSL review
+-- outside Jan–Apr with no review before it is known only on its day). The upsert keeps the earliest
+-- known_since, so rows stored under the old rules are corrected here. Idempotent.
+UPDATE events SET known_since = event_date + 1
+  WHERE known_since <= event_date AND (kind = 'imf' OR (kind = 'fomc' AND title ILIKE '%unscheduled%'));
+UPDATE events SET known_since = event_date
+  WHERE kind = 'cbsl_policy' AND known_since = event_date - 56 AND extract(month FROM event_date) > 4;
+
 -- Last outcome of each automatic scraper, so a broken source is visible instead of silent.
 CREATE TABLE IF NOT EXISTS source_health (
   source        text PRIMARY KEY,
@@ -171,6 +179,8 @@ CREATE TABLE IF NOT EXISTS sync_lock (
   id        int PRIMARY KEY,
   locked_at timestamptz NOT NULL
 );
+-- Who holds the lock (random per run), so a run only ever releases its own lock.
+ALTER TABLE sync_lock ADD COLUMN IF NOT EXISTS token text;
 `;
 
 export function ensureSchema(): Promise<void> {

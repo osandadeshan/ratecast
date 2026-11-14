@@ -153,5 +153,11 @@ Phase 4 results (2026-11-14, `npm run backtest`, same 365/300-day setup, `MODEL_
   over-covered, so those kinds are display-only. Full tables are in `docs/CONTEXT.md`.
 - The scoring INSERT needs `enable_nestloop = off` after a big replay (13 min → 8 s); it's in `lib/sync.ts`.
 
+Audit fixes (2026-11-14, `npm run backtest`, same setup, `MODEL_VERSION` 2026.11.14.2):
+- Skill: SGD→USD 1.0000, USD→LKR 1.0000, SGD→LKR 1.0000. The Student-t bar (n_eff ≥ 5) no longer promotes
+  `holt`/`drift`/`monthly_pattern` on 8–31 dates at 15–31d, so SGD→LKR's 0.9934 (luck) is gone.
+- 80% coverage: SGD→USD 81.5%, USD→LKR 75.2% (15–31d 72.4%), SGD→LKR 83.0%, with the one-sided trend stretch
+  (c = 0.4, LKR pairs only). Full table in `docs/CONTEXT.md`.
+
 Older baseline (2026-11-09, 90-day replay), ensemble / naive MAE %: LKR 1d 0.126/0.126 · 15–31d 0.396/0.399; USD 1d 0.095/0.093 ·
 15–31d 0.380/0.315.

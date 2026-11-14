@@ -20,7 +20,7 @@ export const CROSS_LEGS: Partial<Record<Target, readonly [Target, Target]>> = { 
  * lib/predict, the learning rules or the inputs change, so accuracy can be compared per version.
  * The git commit is appended on Vercel.
  */
-export const MODEL_VERSION_BASE = "2026.11.14";
+export const MODEL_VERSION_BASE = "2026.11.14.2";
 export const MODEL_VERSION =
   MODEL_VERSION_BASE + (process.env.VERCEL_GIT_COMMIT_SHA ? `+${process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7)}` : "");
 
@@ -54,6 +54,28 @@ export const REPLAY_BUDGET_MS = Number(process.env.REPLAY_BUDGET_MS) || 40_000;
  */
 export const BACKTEST_BUDGET_MS = Number(process.env.BACKTEST_BUDGET_MS) || 50_000;
 export const CRON_BACKTEST_BUDGET_MS = 240_000;
+
+/**
+ * 80% band, LKR pairs: the side the recent trend points to is stretched by c × |mean daily log move
+ * over BAND_TREND_DAYS| × h. LKR errors grow faster than √h during a trend, and the symmetric band
+ * under-covered in the 2026 slide. Band-only: point forecasts are unchanged. Not used for SGD→USD (it
+ * already covers ~82%). See docs/CONTEXT.md, 2026-11-14.
+ */
+export const BAND_TREND_STRETCH: Partial<Record<string, number>> = { LKR: 0.4, USDLKR: 0.4 };
+export const BAND_TREND_DAYS = 30;
+
+/**
+ * A page visit only starts a sync (self-healing a missed cron) from this Singapore time on. The cron
+ * runs at 09:30 SGT, after Wise, CBSL and FRED have published; a visitor's earlier sync would make
+ * the day's permanent (write-once) forecast from less data and hold the lock when the cron fires.
+ */
+export const PAGE_SYNC_FROM_SGT = "10:30";
+/** A page visit doesn't start another sync if any run started within this many minutes (failed runs). */
+export const PAGE_SYNC_COOLDOWN_MIN = 15;
+/** Lock expiry: longer than the cron route's 300 s limit, so a live run never loses its lock. */
+export const SYNC_LOCK_MINUTES = 6;
+/** Outcome statements a page-triggered sync reads at most (the cron reads up to 32). */
+export const PAGE_OUTCOME_FETCHES = 4;
 
 /** Window of evaluated predictions used for weights / bias. */
 export const LEARNING_WINDOW_DAYS = 180;

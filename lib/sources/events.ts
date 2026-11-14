@@ -1,4 +1,4 @@
-import { addDays } from "../dates";
+import { addDays, isValidISO } from "../dates";
 import type { EventRecord } from "../predict/events";
 import { getBytes, getJSON, getText } from "./http";
 import { compact, pdfText } from "./pdf";
@@ -49,8 +49,11 @@ const monthNum = (name: string) => {
   const n = name.toLowerCase();
   return MONTHS.findIndex((m) => m === n || m.slice(0, 3) === n) + 1;
 };
-const iso = (y: number, m: number, d: number) =>
-  `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+/** YYYY-MM-DD, or null if that day doesn't exist (a typo like "31 November" in a statement). */
+const iso = (y: number, m: number, d: number): string | null => {
+  const s = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  return isValidISO(s) ? s : null;
+};
 
 function htmlTokens(html: string): string[] {
   return html
@@ -67,7 +70,8 @@ function fomcEvent(date: string, unscheduled: boolean, source: string, url: stri
   return {
     kind: "fomc",
     eventDate: date,
-    knownSince: unscheduled ? date : addDays(date, -FOMC_LEAD_DAYS),
+    // Unscheduled decisions are announced in US time, i.e. after the 09:30 SGT sync on that day.
+    knownSince: unscheduled ? addDays(date, 1) : addDays(date, -FOMC_LEAD_DAYS),
     source,
     title: unscheduled ? "FOMC decision (unscheduled meeting)" : "FOMC rate decision",
     url,
@@ -97,7 +101,8 @@ export function parseFomcPage(html: string): EventRecord[] {
     const m = mon[2] && end < start ? monthNum(mon[2]) : monthNum(mon[1]);
     if (m < 1) continue;
     // Jan/Feb style meetings that roll into the next month stay within the same year.
-    out.push(fomcEvent(iso(year, m, end), note === "unscheduled", "fed-page", FED_PAGE));
+    const date = iso(year, m, end);
+    if (date) out.push(fomcEvent(date, note === "unscheduled", "fed-page", FED_PAGE));
   }
   return out;
 }
@@ -110,9 +115,13 @@ export function parseFomcJson(cal: FedCalendar): EventRecord[] {
   const out: EventRecord[] = [];
   for (const e of cal.events ?? []) {
     if (e.type !== "FOMC" || !/^\s*fomc meeting\s*$/i.test(e.title ?? "") || !e.month) continue;
-    const [y, m] = e.month.split("-").map(Number);
-    const day = Number(String(e.days ?? "").match(/(\d{1,2})\s*$/)?.[1]);
-    if (y && m && day) out.push(fomcEvent(iso(y, m, day), false, "fed-json", FED_JSON));
+    let [y, m] = e.month.split("-").map(Number);
+    const ds = String(e.days ?? "").match(/\d{1,2}/g)?.map(Number) ?? [];
+    const day = ds.at(-1);
+    // "30-1": a meeting that ends in the next month.
+    if (ds.length > 1 && day! < ds[0]) [y, m] = m === 12 ? [y + 1, 1] : [y, m + 1];
+    const date = y && m && day ? iso(y, m, day) : null;
+    if (date) out.push(fomcEvent(date, false, "fed-json", FED_JSON));
   }
   return out;
 }
@@ -125,12 +134,20 @@ export async function fetchFomc(): Promise<SourceResult[]> {
       ? { source: "fed-page", events: parseFomcPage(page.value) }
       : { source: "fed-page", events: [], error: String(page.reason) },
   );
-  res.push(
-    json.status === "fulfilled"
-      ? { source: "fed-json", events: parseFomcJson(json.value) }
-      : { source: "fed-json", events: [], error: String(json.reason) },
-  );
-  for (const r of res) if (!r.error && r.events.length === 0) r.error = "parsed 0 meetings (page layout changed?)";
+  // fed-json can't mark unscheduled meetings, so it only adds dates the page doesn't have (else its
+  // 300-day lead would backdate an unscheduled meeting's known_since).
+  const onPage = new Set(res[0].events.map((e) => e.eventDate));
+  if (json.status === "fulfilled") {
+    const all = parseFomcJson(json.value);
+    res.push(
+      all.length
+        ? { source: "fed-json", events: all.filter((e) => !onPage.has(e.eventDate)), note: `${all.length} meetings listed` }
+        : { source: "fed-json", events: [], error: "parsed 0 meetings (page layout changed?)" },
+    );
+  } else {
+    res.push({ source: "fed-json", events: [], error: String(json.reason) });
+  }
+  if (!res[0].error && res[0].events.length === 0) res[0].error = "parsed 0 meetings (page layout changed?)";
   return res;
 }
 
@@ -139,7 +156,7 @@ export function parseCbslList(html: string): { date: string; url: string }[] {
   const seen = new Map<string, string>();
   for (const m of html.matchAll(/href="([^"]*press_(\d{4})(\d{2})(\d{2})_Monetary_Policy_Review[^"]*\.pdf)"/gi)) {
     const date = `${m[2]}-${m[3]}-${m[4]}`;
-    if (!seen.has(date)) seen.set(date, new URL(m[1], CBSL_MPR).toString());
+    if (isValidISO(date) && !seen.has(date)) seen.set(date, new URL(m[1], CBSL_MPR).toString());
   }
   return [...seen.entries()].map(([date, url]) => ({ date, url })).sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -161,7 +178,14 @@ export async function fetchCbslReviews(): Promise<SourceResult> {
     const events: EventRecord[] = list.map((r, i) => {
       const prev = list[i - 1];
       // Each statement announces the next review date, so it was public from the previous review on.
-      const knownSince = prev && r.date > prev.date && r.date <= addDays(prev.date, 120) ? prev.date : addDays(r.date, -56);
+      // Otherwise: the year's first reviews (Jan–Apr) are on CBSL's yearly schedule, published around the
+      // previous November, so ~8 weeks ahead; any other review without a predecessor is only known that day.
+      const knownSince =
+        prev && r.date > prev.date && r.date <= addDays(prev.date, 120)
+          ? prev.date
+          : Number(r.date.slice(5, 7)) <= 4
+            ? addDays(r.date, -56)
+            : r.date;
       return { kind: "cbsl_policy", eventDate: r.date, knownSince, source, title: "CBSL monetary policy review", url: r.url };
     });
     const latest = list[list.length - 1];
@@ -286,7 +310,8 @@ export function parseCbslRss(xml: string): EventRecord[] {
     const t = new Date(pub);
     if (Number.isNaN(t.getTime())) continue;
     const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Colombo", year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
-    out.push({ kind: "imf", eventDate: date, knownSince: date, source: "cbsl-rss", title, url: link, outcome: classifyImf(title) });
+    // Recorded after the fact; CBSL may publish after the 09:30 SGT sync, so it counts from the next day.
+    out.push({ kind: "imf", eventDate: date, knownSince: addDays(date, 1), source: "cbsl-rss", title, url: link, outcome: classifyImf(title) });
   }
   return out;
 }
@@ -321,6 +346,7 @@ export function parseBlsSchedule(html: string, url: string): EventRecord[] {
     const m = monthNum(date[1]);
     if (!rel || !m) continue;
     const eventDate = iso(Number(date[3]), m, Number(date[2]));
+    if (!eventDate) continue;
     out.push({ kind: rel.kind, eventDate, knownSince: blsKnownSince(rel.kind, eventDate), source: "bls", title: rel.title, url });
   }
   return out;

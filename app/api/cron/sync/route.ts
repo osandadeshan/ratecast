@@ -31,6 +31,7 @@ export async function GET(request: Request) {
   } else if (request.headers.get("authorization") !== `Bearer ${secret}`) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  const result = await runSync({ backtestBudgetMs: CRON_BACKTEST_BUDGET_MS });
+  // A page-triggered run may hold the lock; wait for it (≤ 70 s) rather than skip the day's cron.
+  const result = await runSync({ backtestBudgetMs: CRON_BACKTEST_BUDGET_MS, waitForLockMs: 70_000 });
   return Response.json(result, { status: result.status === "error" ? 500 : 200 });
 }

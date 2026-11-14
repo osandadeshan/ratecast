@@ -1,4 +1,4 @@
-import { MAX_HORIZON } from "../config";
+import { BAND_TREND_DAYS, BAND_TREND_STRETCH, MAX_HORIZON } from "../config";
 import { addDays } from "../dates";
 import { effectiveHorizon } from "./calendar";
 import { type EventRecord, type EventVolStat, eventExtraVar } from "./events";
@@ -62,11 +62,15 @@ export function forecast(opts: {
   };
   const out: PredictionRow[] = [];
   const perModel: Record<string, number[]> = {};
-  for (const name of MODEL_NAMES) perModel[name] = MODELS[name](ctx, H);
+  const lastLog = series.logs[series.logs.length - 1];
+  // A model output that isn't finite (bad input data) falls back to the random walk, so it can't
+  // poison the blend (0 × NaN = NaN) or, through its stored errors, later learning.
+  for (const name of MODEL_NAMES) perModel[name] = MODELS[name](ctx, H).map((v) => (Number.isFinite(v) ? v : lastLog));
 
   const dailyVol = std(diffs(series.logs.slice(-61)));
-
-  const lastLog = series.logs[series.logs.length - 1];
+  const stretch = (opts.pair && BAND_TREND_STRETCH[opts.pair]) || 0;
+  const recent = series.logs.slice(-(BAND_TREND_DAYS + 1));
+  const trend = stretch && recent.length > 1 ? (recent[recent.length - 1] - recent[0]) / (recent.length - 1) : 0;
   const nonTrading = opts.stats.nonTradingDow ?? [];
 
   for (let h = 1; h <= H; h++) {
@@ -75,21 +79,21 @@ export function forecast(opts: {
     const hEff = effectiveHorizon(opts.anchorDate, h, nonTrading);
     const effDate = addDays(opts.anchorDate, hEff);
     const s = statsFor(opts.stats, Math.max(hEff, 1));
-    const row = (model: string, v: number, half: number | null): PredictionRow => ({
+    const row = (model: string, v: number, half: number | null, up: number | null = half): PredictionRow => ({
       madeOn: opts.anchorDate,
       targetDate,
       horizon: h,
       model,
       predicted: Math.exp(v),
       lower80: half === null ? null : Math.exp(v - half),
-      upper80: half === null ? null : Math.exp(v + half),
+      upper80: up === null ? null : Math.exp(v + up),
     });
 
     let blend = 0;
     for (const name of MODEL_NAMES) {
       const v = hEff === 0 ? lastLog : perModel[name][hEff - 1];
       out.push(row(name, v, null));
-      blend += s.weights[name] * v;
+      if (s.weights[name]) blend += s.weights[name] * v;
     }
     out.push(row("blend", blend, null));
     out.push(row("blend_bc", hEff === 0 ? blend : blend - s.bias, null));
@@ -100,6 +104,7 @@ export function forecast(opts: {
     // are too few errors: the normal approximation Z80 × sigma. Event variance is added in
     // quadrature as Z80² × extra, i.e. the half-width an extra normal move of that variance has.
     let half = FROZEN_HALF_WIDTH;
+    let ext = 0;
     if (hEff > 0) {
       const base =
         s.q80 != null
@@ -107,8 +112,10 @@ export function forecast(opts: {
           : Z80 * (s.sigma ?? Math.max(dailyVol, 1e-4) * Math.sqrt(hEff));
       const extra = opts.events && opts.eventStats ? eventExtraVar(opts.events, opts.eventStats, opts.anchorDate, effDate) : 0;
       half = Math.sqrt(base ** 2 + Z80 ** 2 * extra);
+      // LKR pairs: stretch the side the recent trend points to (BAND_TREND_STRETCH).
+      ext = stretch * Math.abs(trend) * hEff;
     }
-    out.push(row("ensemble", corrected, half));
+    out.push(row("ensemble", corrected, half + (trend < 0 ? ext : 0), half + (trend > 0 ? ext : 0)));
   }
   return out;
 }
