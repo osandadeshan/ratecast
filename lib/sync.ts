@@ -61,19 +61,34 @@ async function releaseLock(token: string) {
 /**
  * Should a page visit start a sync? Only to self-heal a missed or failed cron run: not before
  * PAGE_SYNC_FROM_SGT (the 09:30 SGT cron makes the day's forecast from complete data), not if
- * today already has an ok run, and not within PAGE_SYNC_COOLDOWN_MIN of any run's start (so a
- * failing source can't turn every page view into a 60 s sync).
+ * today already has an ok run that forecast every pair, and not within PAGE_SYNC_COOLDOWN_MIN of
+ * any run's start (so a failing source can't turn every page view into a 60 s sync).
+ * "Every pair" matters after a deploy that adds a pair: an earlier run that day (old code) is ok
+ * but never forecast the new pair, which would otherwise stay empty until the next day.
  */
 export async function needsSync(now = new Date()): Promise<boolean> {
   await ensureSchema();
   const today = todayISO(now);
   if (timeHM(now) < PAGE_SYNC_FROM_SGT) return false;
-  const rows = await db()`
-    SELECT
-      bool_or(status = 'ok' AND run_date = ${today}) AS done,
-      max(started_at) > now() - make_interval(mins => ${PAGE_SYNC_COOLDOWN_MIN}) AS recent
-    FROM sync_runs WHERE started_at > now() - interval '2 days'`;
-  return !rows[0]?.done && !rows[0]?.recent;
+  const sql = db();
+  const [rows, forecast] = await Promise.all([
+    sql`
+      SELECT
+        bool_or(status = 'ok' AND run_date = ${today}) AS done,
+        max(started_at) > now() - make_interval(mins => ${PAGE_SYNC_COOLDOWN_MIN}) AS recent
+      FROM sync_runs WHERE started_at > now() - interval '2 days'`,
+    sql`
+      SELECT DISTINCT currency FROM predictions
+      WHERE currency IN ${sql(TARGETS as unknown as string[])} AND made_on = ${today} AND model = 'ensemble'`,
+  ]);
+  if (rows[0]?.recent) return false;
+  return !rows[0]?.done || !allPairsForecast(forecast.map((r) => r.currency as string));
+}
+
+/** True when every pair in TARGETS has today's forecast (pure, for tests). */
+export function allPairsForecast(currencies: string[]): boolean {
+  const have = new Set(currencies);
+  return TARGETS.every((t) => have.has(t));
 }
 
 export async function runSync(

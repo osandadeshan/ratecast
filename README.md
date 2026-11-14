@@ -147,7 +147,7 @@ flowchart TD
 | Trigger | When | Purpose |
 |---|---|---|
 | **Daily cron** | Every day 01:00–01:59 UTC (09:00–09:59 SGT) | Main schedule. Always runs, even if a sync already happened that day (it refreshes the forecast with a newer live rate). |
-| **First visit of the day** | First page view from 10:30 SGT, only if no successful sync exists for that date and none started in the last 15 min | Backup, so a missed or failed cron never leaves the site stale. Not earlier, so a visitor never makes the day's permanent forecast before the cron has the morning's data. The visitor doesn't wait; the next page load shows fresh data. |
+| **First visit of the day** | First page view from 10:30 SGT, only if no successful sync exists for that date (or one exists but a pair has no forecast for today, e.g. right after a deploy that added a pair) and none started in the last 15 min | Backup, so a missed or failed cron never leaves the site stale. Not earlier, so a visitor never makes the day's permanent forecast before the cron has the morning's data. The visitor doesn't wait; the next page load shows fresh data. |
 | **Manual** | `GET /api/cron/sync` with `Authorization: Bearer <CRON_SECRET>`, or `npm run sync` locally | Debugging / forcing a refresh |
 
 A typical day:
