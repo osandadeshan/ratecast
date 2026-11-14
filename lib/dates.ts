@@ -12,6 +12,16 @@ export function todayISO(now = new Date()): string {
   }).format(now);
 }
 
+/** "HH:MM" (24 h) for "now" in the app timezone. */
+export function timeHM(now = new Date()): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: APP_TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
+}
+
+/** True if `d` is a real calendar date in YYYY-MM-DD form (rejects 2026-11-31, 2026-13-01). */
+export function isValidISO(d: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) && toISO(parseISO(d)) === d;
+}
+
 export function toISO(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }

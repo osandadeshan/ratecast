@@ -1,7 +1,8 @@
 import { Suspense } from "react";
+import { revalidateTag } from "next/cache";
 import { after, connection } from "next/server";
 import DashboardView from "./components/DashboardView";
-import { getDashboard } from "@/lib/dashboard";
+import { DASHBOARD_TAG, getDashboard } from "@/lib/dashboard";
 import { hasDb } from "@/lib/db";
 import { needsSync, runSync } from "@/lib/sync";
 
@@ -19,12 +20,24 @@ async function Data() {
   await connection();
   const data = await getDashboard();
 
-  // Self-healing: if today's model run hasn't happened yet (cron missed, first deploy), run it
-  // after the response is sent, so the next visitor sees fresh forecasts.
+  // Self-healing: if today's cron run is missing or failed (first deploy, cron outage), run it after
+  // the response is sent. needsSync() waits for the cron's slot and has a cooldown (lib/sync.ts).
   if (hasDb()) {
     after(async () => {
       try {
-        if (await needsSync()) await runSync();
+        if (await needsSync()) {
+          const r = await runSync({ page: true });
+          // The page data is cached for 5 min; drop it so the next visit shows the new run. revalidateTag
+          // is documented for Route Handlers and Server Functions; if it isn't allowed here, the 5-min
+          // cache life still picks the run up.
+          if (r.status !== "skipped") {
+            try {
+              revalidateTag(DASHBOARD_TAG, { expire: 0 });
+            } catch (e) {
+              console.warn("dashboard cache not revalidated", e);
+            }
+          }
+        }
       } catch (e) {
         console.error("background sync failed", e);
       }

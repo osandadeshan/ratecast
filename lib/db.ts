@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS market_data (
   PRIMARY KEY (series, date)
 );
 
--- Every forecast every model makes. model = drift|holt|monthly_pattern|mean_reversion|market|blend|blend_bc|ensemble
+-- Every forecast every model makes. model = one of MODELS (lib/predict/models.ts) or blend|blend_bc|ensemble
 CREATE TABLE IF NOT EXISTS predictions (
   id            bigserial PRIMARY KEY,
   currency      text NOT NULL,
@@ -94,6 +94,51 @@ CREATE TABLE IF NOT EXISTS model_stats (
   PRIMARY KEY (currency, as_of)
 );
 
+-- Policy events, fetched automatically (FOMC, CBSL reviews, IMF news, BLS CPI/jobs days). kind is data: never rename.
+-- known_since = first day the event and its date were public (no-look-ahead gate for replay).
+CREATE TABLE IF NOT EXISTS events (
+  kind        text NOT NULL,                 -- fomc | cbsl_policy | imf | us_cpi | us_jobs
+  event_date  date NOT NULL,                 -- announcement date (institution's local date)
+  known_since date NOT NULL,
+  source      text NOT NULL,                 -- fed-page | fed-json | cbsl-mpr | cbsl-rss | bls
+  title       text NOT NULL,
+  url         text,
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (kind, event_date)
+);
+
+-- What was decided (cut | hold | hike for policy reviews; sla | board | other for IMF news).
+-- Filled automatically after the announcement from the statement itself; 'unclear' if unparsable.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS outcome text;
+
+-- known_since rules tightened 2026-11-14 (after-the-fact events count from the next day; a CBSL review
+-- outside Jan–Apr with no review before it is known only on its day). The upsert keeps the earliest
+-- known_since, so rows stored under the old rules are corrected here. Idempotent.
+UPDATE events SET known_since = event_date + 1
+  WHERE known_since <= event_date AND (kind = 'imf' OR (kind = 'fomc' AND title ILIKE '%unscheduled%'));
+UPDATE events SET known_since = event_date
+  WHERE kind = 'cbsl_policy' AND known_since = event_date - 56 AND extract(month FROM event_date) > 4;
+
+-- Last outcome of each automatic scraper, so a broken source is visible instead of silent.
+CREATE TABLE IF NOT EXISTS source_health (
+  source        text PRIMARY KEY,
+  last_ok_at    timestamptz,
+  last_error_at timestamptz,
+  last_error    text,
+  last_note     text,
+  last_count    int
+);
+
+-- Immutable forecast record (added 2026-11-13). origin: 'live' = made by the run on made_on, 'replay' =
+-- reconstructed later from data known on made_on. model_version: MODEL_VERSION (+ git commit) that wrote it.
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS origin text;
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS model_version text;
+-- Partial index: once every row has an origin it is empty, so the backfill below costs nothing.
+CREATE INDEX IF NOT EXISTS predictions_origin_null ON predictions (id) WHERE origin IS NULL;
+-- Rows written before these columns existed: a row created on its own made_on (SGT) was the live run.
+UPDATE predictions SET origin = CASE WHEN (created_at AT TIME ZONE 'Asia/Singapore')::date = made_on THEN 'live' ELSE 'replay' END
+  WHERE origin IS NULL;
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          bigserial PRIMARY KEY,
   started_at  timestamptz NOT NULL DEFAULT now(),
@@ -102,11 +147,40 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   status      text NOT NULL DEFAULT 'running',
   message     text
 );
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS model_version text;
+
+-- Model version history (added 2026-11-13). One row per MODEL_VERSION that ran a sync. backtest = the
+-- automatic 365-day in-memory replay of that code (lib/predict/backtest.ts), scored vs the random walk;
+-- comparison = against the previous version that has a backtest. Written once per version, never updated.
+CREATE TABLE IF NOT EXISTS model_versions (
+  version      text PRIMARY KEY,
+  first_run    date NOT NULL,
+  backtest_on  date,
+  backtest     jsonb,
+  previous     text,
+  comparison   jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Audit log of the learner: a model or the bias correction switched on (promoted) or off (demoted) in a
+-- horizon bucket, with the paired t-statistic that decided it. Append-only.
+CREATE TABLE IF NOT EXISTS learning_log (
+  currency      text NOT NULL,
+  as_of         date NOT NULL,
+  bucket        int  NOT NULL,
+  item          text NOT NULL,
+  change        text NOT NULL,
+  t_stat        double precision,
+  model_version text,
+  PRIMARY KEY (currency, as_of, bucket, item)
+);
 
 CREATE TABLE IF NOT EXISTS sync_lock (
   id        int PRIMARY KEY,
   locked_at timestamptz NOT NULL
 );
+-- Who holds the lock (random per run), so a run only ever releases its own lock.
+ALTER TABLE sync_lock ADD COLUMN IF NOT EXISTS token text;
 `;
 
 export function ensureSchema(): Promise<void> {

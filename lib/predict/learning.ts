@@ -1,5 +1,8 @@
-import { HORIZON_BUCKETS, LEARNING_WINDOW_DAYS, bucketOf } from "../config";
-import { addDays, diffDays } from "../dates";
+import { HORIZON_BUCKETS, LEARNING_WINDOW_DAYS, MAX_HORIZON, bucketOf } from "../config";
+import { addDays } from "../dates";
+import { dowOf } from "./calendar";
+import type { EventVolStat } from "./events";
+import type { NewsDriftStat } from "./news";
 import { MODEL_NAMES } from "./models";
 
 /** One evaluated prediction (a row of prediction_errors). */
@@ -21,14 +24,39 @@ export interface BucketStats {
   biasOn: number;
   maeBlend: number | null; // % — raw blend
   maeCorrected: number | null; // % — blend with bias correction (counterfactual, always tracked)
-  sigma: number | null; // std of final-ensemble log errors
+  sigma: number | null; // RMS of final-ensemble log errors (kept for transparency / fallback)
   sigmaN: number;
+  /**
+   * Empirical 80th percentile of |ensemble log error|, each error first scaled to the bucket's mean
+   * horizon (÷ √(h / meanH)). The band half-width at horizon h is q80 × √(h / meanH). null if n < 30.
+   */
+  q80?: number | null;
+  /**
+   * Every model except `naive`: true once it has beaten the random walk in this bucket (enough
+   * distinct target dates and a paired t < −2.6 on per-date |error| vs naive). false = scored but weight 0.
+   */
+  promoted?: Record<string, boolean>;
+  /**
+   * The paired t-statistic behind each promotion decision (vs `naive`; `blend_bc` vs `blend` for the bias
+   * correction). null = fewer than the required distinct dates. Promoted when t < −2.6. For the audit log.
+   */
+  t?: Record<string, number | null>;
 }
 
 export interface LearnedStats {
   asOf: string;
   windowDays: number;
   buckets: BucketStats[];
+  /**
+   * Weekdays (0 = Sunday … 6 = Saturday) on which the rate does not move (detected, see calendar.ts).
+   * Forecasts are frozen across them and their target dates are excluded from learning; accuracy
+   * shown to users should exclude them too (they are trivially "right").
+   */
+  nonTradingDow?: number[];
+  /** Per event kind: how much bigger moves are around announcements (set by sync, see events.ts). */
+  events?: EventVolStat[];
+  /** Post-announcement drift per `kind:outcome` (set by sync, see news.ts). */
+  news?: NewsDriftStat[];
 }
 
 const SHRINK_MAE = 10;
@@ -36,37 +64,220 @@ const SHRINK_BIAS = 15;
 const HALF_LIFE = 14;
 /** Higher = trust the historically best models more aggressively. */
 const WEIGHT_POWER = 4;
-const MIN_GATE_SAMPLES = 20;
+/**
+ * A model other than `naive` gets weight in a bucket only if it has been scored on this many
+ * distinct target dates there (long-horizon forecasts overlap heavily, so raw counts overstate the
+ * evidence) and it beats the random walk by a paired t-test (t < −T_BEATS). FX is close to a
+ * random walk, so a model must prove itself before it may move the forecast.
+ */
+export const MIN_PROMOTE_DATES = 30;
+/**
+ * Bar for "significantly better than the random walk" (see `beats`). About 10 candidates are tested
+ * per bucket every day (9 models + the bias correction), so a plain t < −2 (≈2.3% false positives per
+ * test) promotes noise regularly: in the 2026-11-12 three-pair replay it promoted a model for USD→LKR
+ * through May 2026 and made 2–7 day forecasts 5% worse. Bonferroni for a 5% family-wise rate over
+ * 10 candidates: z(1 − 0.05/10) ≈ 2.58, rounded to 2.6.
+ */
+const T_BEATS = 2.6;
+/**
+ * The effective sample behind a long-horizon test is small (30 dates at 15–31 days ≈ 1.3 independent
+ * forecasts), and with so few the normal 2.6 promotes noise: the 2026-11-14 replay promoted holt, drift
+ * and monthly_pattern at 8–31 days right after warm-up on n_eff 1.3–3.2. So the bar is the Student-t
+ * value at the same tail probability (one-sided 0.5%, i.e. 5% over ~10 candidates) with n_eff − 1
+ * degrees of freedom, never below T_BEATS, and no test at all with n_eff < MIN_N_EFF.
+ */
+const MIN_N_EFF = 5;
+/** Student-t upper 0.5% critical values by degrees of freedom (df ≥ 120 → the normal value ≈ T_BEATS). */
+const T_CRIT_995: [number, number][] = [
+  [4, 4.604], [5, 4.032], [6, 3.707], [7, 3.499], [8, 3.355], [9, 3.25], [10, 3.169], [12, 3.055],
+  [15, 2.947], [20, 2.845], [25, 2.787], [30, 2.75], [40, 2.704], [60, 2.66], [120, 2.617],
+];
+/** The promotion bar for a paired test with effective sample nEff (exported for tests). */
+export function tBar(nEff: number): number {
+  const df = Math.floor(nEff) - 1;
+  for (const [d, v] of T_CRIT_995) if (df <= d) return Math.max(v, T_BEATS);
+  return T_BEATS;
+}
 /** Long-horizon errors arrive weeks late (stale regime), so only correct bias up to this horizon. */
 const MAX_BIAS_BUCKET = 7;
+const MIN_Q80_SAMPLES = 30;
+/**
+ * Recency half-life (days of target age) of the errors behind the 80% band. The 2026-11-14 backtest
+ * (equal weights → 60 → 30 → 15 days): USD→LKR coverage 67.2 → 69.6 → 70.7 → 71.2%, SGD→USD 83.5 → 82.4
+ * → 81.6 → 80.1%, SGD→LKR 80.2 → 80.4 → 79.1 → 75.7%; MAE identical. 30 = smallest total distance to 80%.
+ */
+export const BAND_HALF_LIFE_DAYS = 30;
+
+/** Smallest value whose cumulative weight reaches q of the total (= the plain quantile for equal weights). */
+export function weightedQuantile(xs: { a: number; w: number }[], q: number): number {
+  const s = [...xs].sort((x, y) => x.a - y.a);
+  const total = s.reduce((t, x) => t + x.w, 0);
+  let c = 0;
+  for (const x of s) {
+    c += x.w;
+    if (c >= q * total - 1e-12) return x.a;
+  }
+  return s[s.length - 1].a;
+}
+
+/** Mean horizon of each bucket (1, 2.5, 5.5, 11, 23 for the default buckets). */
+export const BUCKET_MEAN_H: Record<number, number> = Object.fromEntries(
+  HORIZON_BUCKETS.map((b, i) => {
+    const lo = i === 0 ? 1 : HORIZON_BUCKETS[i - 1] + 1;
+    const hi = i === HORIZON_BUCKETS.length - 1 ? Math.max(b, MAX_HORIZON) : b;
+    return [b, (lo + hi) / 2];
+  }),
+);
+
+interface DayAgg {
+  n: number;
+  sum: number; // Σ log error
+  sumAbs: number;
+  sumSq: number;
+  absNorm: number[] | null; // ensemble only: |error| ÷ √(h / meanH)
+}
+
+/**
+ * Errors grouped by (bucket, model, target date) so that learning on one day costs
+ * O(models × window days) instead of rescanning every error. Append-only.
+ */
+export class ErrorIndex {
+  private groups = new Map<string, Map<string, DayAgg>>();
+
+  constructor(records: ErrorRecord[] = []) {
+    for (const r of records) this.add(r);
+  }
+
+  add(e: ErrorRecord) {
+    if (!Number.isFinite(e.logError)) return; // a NaN would poison every MAE and weight for 180 days
+    const bucket = bucketOf(e.horizon);
+    const key = `${bucket}|${e.model}`;
+    let g = this.groups.get(key);
+    if (!g) this.groups.set(key, (g = new Map()));
+    let d = g.get(e.targetDate);
+    if (!d) g.set(e.targetDate, (d = { n: 0, sum: 0, sumAbs: 0, sumSq: 0, absNorm: e.model === "ensemble" ? [] : null }));
+    const a = Math.abs(e.logError);
+    d.n++;
+    d.sum += e.logError;
+    d.sumAbs += a;
+    d.sumSq += a * a;
+    d.absNorm?.push(a / Math.sqrt(e.horizon / BUCKET_MEAN_H[bucket]));
+  }
+
+  days(bucket: number, model: string): Map<string, DayAgg> | undefined {
+    return this.groups.get(`${bucket}|${model}`);
+  }
+}
+
+export interface LearnOptions {
+  windowDays?: number;
+  minPromoteDates?: number;
+  /** Target dates on these weekdays are ignored (they repeat the previous trading day's outcome). */
+  nonTradingDow?: readonly number[];
+  /** Models that must beat `naive` to get weight. Default: every model except `naive`. */
+  gated?: readonly string[];
+}
 
 /**
  * Turn past deltas into (a) model weights per horizon bucket, (b) a bias correction,
  * (c) an error band. Only errors whose target date is <= asOf are used, so replaying
  * history never peeks into the future.
  */
-export function learn(errors: ErrorRecord[], asOf: string): LearnedStats {
-  const from = addDays(asOf, -LEARNING_WINDOW_DAYS);
-  const recent = errors.filter((e) => e.targetDate <= asOf && e.targetDate > from);
+export function learn(index: ErrorIndex, asOf: string, opts: LearnOptions = {}): LearnedStats {
+  const windowDays = opts.windowDays ?? LEARNING_WINDOW_DAYS;
+  const minDates = opts.minPromoteDates ?? MIN_PROMOTE_DATES;
+  const nonTrading = opts.nonTradingDow ?? [];
+  const gated = opts.gated ?? MODEL_NAMES.filter((m) => m !== "naive");
+
+  // Target dates in the window, newest first, with their age in days (for the bias half-life).
+  // Starts at age 1: the live run on day t never has Wise's official point for t yet (only the
+  // provisional quote), so the replay and backtest mustn't learn from target t either.
+  const window: { date: string; age: number }[] = [];
+  for (let age = 1; age <= windowDays; age++) {
+    const date = addDays(asOf, -age);
+    if (!nonTrading.includes(dowOf(date))) window.push({ date, age });
+  }
 
   const buckets: BucketStats[] = HORIZON_BUCKETS.map((bucket) => {
-    const inB = recent.filter((e) => bucketOf(e.horizon) === bucket);
+    const agg = (model: string) => {
+      const g = index.days(bucket, model);
+      let n = 0;
+      let sumAbs = 0;
+      let dates = 0;
+      if (g) {
+        for (const w of window) {
+          const d = g.get(w.date);
+          if (!d) continue;
+          n += d.n;
+          sumAbs += d.sumAbs;
+          dates++;
+        }
+      }
+      return { n, dates, mae: n ? sumAbs / n : null };
+    };
+
     const mae: Record<string, number | null> = {};
     const n: Record<string, number> = {};
+    const dates: Record<string, number> = {};
     for (const m of MODEL_NAMES) {
-      const xs = inB.filter((e) => e.model === m).map((e) => Math.abs(e.logError));
-      n[m] = xs.length;
-      mae[m] = xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+      const a = agg(m);
+      n[m] = a.n;
+      mae[m] = a.mae;
+      dates[m] = a.dates;
     }
-    const known = MODEL_NAMES.filter((m) => mae[m] !== null);
+
+    // Paired test "is `a` really better than `b` here?": per target date d = mean|err a| − mean|err b|,
+    // t = mean(d) / (sd(d) / √nEff). Forecasts for neighbouring dates overlap by about the bucket's
+    // mean horizon, so the effective sample is nEff = dates / meanH. Better = t < −T_BEATS.
+    const pairedT = (a: string, b: string): number | null => {
+      const ga = index.days(bucket, a);
+      const gb = index.days(bucket, b);
+      if (!ga || !gb) return null;
+      let k = 0;
+      let sum = 0;
+      let sq = 0;
+      for (const w of window) {
+        const da = ga.get(w.date);
+        const db = gb.get(w.date);
+        if (!da || !db) continue;
+        const d = da.sumAbs / da.n - db.sumAbs / db.n;
+        k++;
+        sum += d;
+        sq += d * d;
+      }
+      if (k < minDates) return null;
+      const mean = sum / k;
+      const sd = Math.sqrt(Math.max(sq / k - mean * mean, 0) * (k / (k - 1)));
+      const nEff = k / BUCKET_MEAN_H[bucket];
+      lastNEff = nEff;
+      return sd > 0 ? mean / (sd / Math.sqrt(nEff)) : null;
+    };
+    let lastNEff = 0;
+    const tStats: Record<string, number | null> = {};
+    const beats = (a: string, b: string): boolean => {
+      lastNEff = 0;
+      const t = pairedT(a, b);
+      tStats[a] = t;
+      return t !== null && lastNEff >= MIN_N_EFF && t < -tBar(lastNEff);
+    };
+
+    // Gate: a model is scored every day but only gets weight once it beats the random walk here.
+    const promoted: Record<string, boolean> = {};
+    for (const m of gated) promoted[m] = beats(m, "naive");
+    const active = (m: string) => !(m in promoted) || promoted[m];
+
+    const known = MODEL_NAMES.filter((m) => mae[m] !== null && active(m));
     const pooled = known.length ? known.reduce((s, m) => s + (mae[m] as number), 0) / known.length : null;
 
     const raw: Record<string, number> = {};
     for (const m of MODEL_NAMES) {
-      if (pooled === null) {
+      if (!active(m)) {
+        raw[m] = 0;
+      } else if (pooled === null) {
         raw[m] = 1;
       } else {
-        const shrunk = ((mae[m] ?? pooled) * n[m] + pooled * SHRINK_MAE) / (n[m] + SHRINK_MAE);
+        // Shrink by distinct target dates, not rows: long-horizon rows overlap (31 rows per date).
+        const shrunk = ((mae[m] ?? pooled) * dates[m] + pooled * SHRINK_MAE) / (dates[m] + SHRINK_MAE);
         raw[m] = 1 / (shrunk + 1e-5) ** WEIGHT_POWER;
       }
     }
@@ -74,29 +285,44 @@ export function learn(errors: ErrorRecord[], asOf: string): LearnedStats {
     const weights = Object.fromEntries(MODEL_NAMES.map((m) => [m, raw[m] / total]));
 
     // Bias of the raw blend, recency-weighted, shrunk toward 0 when few samples.
-    const blendErr = inB.filter((e) => e.model === "blend");
+    const blendDays = index.days(bucket, "blend");
     let bw = 0;
     let bs = 0;
-    for (const e of blendErr) {
-      const w = 0.5 ** (diffDays(asOf, e.targetDate) / HALF_LIFE);
-      bw += w;
-      bs += w * e.logError;
+    let blendN = 0;
+    if (blendDays) {
+      for (const w of window) {
+        const d = blendDays.get(w.date);
+        if (!d) continue;
+        const wt = 0.5 ** (w.age / HALF_LIFE);
+        bw += wt * d.n;
+        bs += wt * d.sum;
+        blendN += d.n;
+      }
     }
-    const bias = bw ? (bs / bw) * (blendErr.length / (blendErr.length + SHRINK_BIAS)) : 0;
+    const bias = bw ? (bs / bw) * (blendN / (blendN + SHRINK_BIAS)) : 0;
 
-    // Gate: only correct bias if the corrected variant has beaten the raw blend.
-    const maeOf = (model: string) => {
-      const xs = inB.filter((e) => e.model === model).map((e) => Math.abs(e.logError));
-      return { n: xs.length, mae: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null };
-    };
-    const mb = maeOf("blend");
-    const mc = maeOf("blend_bc");
-    const biasOn =
-      bucket <= MAX_BIAS_BUCKET &&
-      mb.mae !== null && mc.mae !== null && Math.min(mb.n, mc.n) >= MIN_GATE_SAMPLES && mc.mae < mb.mae ? 1 : 0;
+    // Gate: the bias correction must earn its place exactly like a model does (same paired test).
+    const mb = agg("blend");
+    const mc = agg("blend_bc");
+    const biasOn = bucket <= MAX_BIAS_BUCKET && beats("blend_bc", "blend") ? 1 : 0;
 
-    const ens = inB.filter((e) => e.model === "ensemble").map((e) => e.logError);
-    const sigma = ens.length >= 10 ? Math.sqrt(ens.reduce((s, x) => s + x * x, 0) / ens.length) : null;
+    // Band: RMS (fallback) and the empirical 80th percentile of horizon-normalised |errors|.
+    const ensDays = index.days(bucket, "ensemble");
+    let ensN = 0;
+    let ensSq = 0;
+    const abs: { a: number; w: number }[] = [];
+    if (ensDays) {
+      for (const w of window) {
+        const d = ensDays.get(w.date);
+        if (!d) continue;
+        ensN += d.n;
+        ensSq += d.sumSq;
+        const wt = 0.5 ** (w.age / BAND_HALF_LIFE_DAYS);
+        if (d.absNorm) for (const a of d.absNorm) abs.push({ a, w: wt });
+      }
+    }
+    const sigma = ensN >= 10 ? Math.sqrt(ensSq / ensN) : null;
+    const q80 = abs.length >= MIN_Q80_SAMPLES ? weightedQuantile(abs, 0.8) : null;
 
     return {
       bucket,
@@ -104,16 +330,19 @@ export function learn(errors: ErrorRecord[], asOf: string): LearnedStats {
       mae: Object.fromEntries(MODEL_NAMES.map((m) => [m, mae[m] === null ? null : (mae[m] as number) * 100])),
       n,
       bias,
-      biasN: blendErr.length,
+      biasN: blendN,
       biasOn,
       maeBlend: mb.mae === null ? null : mb.mae * 100,
       maeCorrected: mc.mae === null ? null : mc.mae * 100,
       sigma,
-      sigmaN: ens.length,
+      sigmaN: ensN,
+      q80,
+      promoted,
+      t: tStats,
     };
   });
 
-  return { asOf, windowDays: LEARNING_WINDOW_DAYS, buckets };
+  return { asOf, windowDays, buckets, nonTradingDow: [...nonTrading] };
 }
 
 export function statsFor(stats: LearnedStats, horizon: number): BucketStats {

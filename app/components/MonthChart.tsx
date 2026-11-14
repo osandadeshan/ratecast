@@ -43,11 +43,26 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
   }));
 
   const values = data.flatMap((p) => [p.actual, p.predicted, p.lastMonth, ...(p.band ?? [])]).filter(
-    (v): v is number => v !== null,
+    (v): v is number => v !== null && Number.isFinite(v),
   );
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const pad = (max - min) * 0.12 || max * 0.001;
+  // No values: a fixed domain (the caller shows an empty state instead, this only guards against NaN).
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 1;
+  const pad = (max - min) * 0.12 || max * 0.001 || 1;
+
+  // Text summary for screen readers (the SVG itself is hidden from them).
+  const last = [...month].reverse().find((d) => d.actual !== null);
+  const end = month[month.length - 1];
+  const summary = [
+    `Rate chart, ${shortDate(month[0].date)} to ${shortDate(end.date)}.`,
+    last ? `Latest actual ${fmt(last.actual, decimals)} ${target} on ${shortDate(last.date)}.` : "",
+    end.predicted !== null
+      ? `Forecast for ${shortDate(end.date)}: ${fmt(end.predicted, decimals)}` +
+        (end.lower80 !== null ? `, 80% range ${fmt(end.lower80, decimals)} to ${fmt(end.upper80, decimals)}.` : ".")
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div>
@@ -59,13 +74,15 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
           80% range
         </span>
         <LegendItem color="var(--series-3)" label="Same day last month" thin />
+        {month.some((d) => d.events.length > 0) && <LegendItem color="var(--text-3)" label="Policy event" dotted />}
       </div>
-      <div className="h-[300px] sm:h-[340px] -ml-2">
+      <div className="h-[300px] sm:h-[340px] -ml-2" role="img" aria-label={summary}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="var(--grid)" vertical={false} />
             <XAxis
-              dataKey="day"
+              dataKey="date"
+              tickFormatter={(v: string) => String(Number(v.slice(8)))}
               tickLine={false}
               axisLine={{ stroke: "var(--border)" }}
               tick={{ fill: "var(--text-3)", fontSize: 11 }}
@@ -97,8 +114,14 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
                     {p.kind !== "past" && p.lower80 !== null && (
                       <Row label="80% range" value={`${fmt(p.lower80, decimals)} – ${fmt(p.upper80, decimals)}`} />
                     )}
-                    {p.delta !== null && <Row label="Miss" value={`${fmt(p.delta, decimals)} (${pct(-p.pctError!, 3)})`} />}
+                    {p.delta !== null && (
+                      <Row
+                        label={p.delta > 0 ? "Too high by" : p.delta < 0 ? "Too low by" : "Miss"}
+                        value={`${fmt(Math.abs(p.delta), decimals)} (${pct(Math.abs(p.pctError!), 3, false)})`}
+                      />
+                    )}
                     {p.lastMonth !== null && <Row label="Last month" value={fmt(p.lastMonth, decimals)} />}
+                    {p.events.length > 0 && <Row label="Policy event" value={p.events.join(", ")} />}
                   </div>
                 );
               }}
@@ -137,8 +160,20 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
               activeDot={{ r: 4.5, strokeWidth: 2, stroke: "var(--surface)" }}
               isAnimationActive={false}
             />
+            {month
+              .filter((d) => d.events.length > 0)
+              .map((d) => (
+                <ReferenceLine
+                  key={d.date}
+                  x={d.date}
+                  stroke="var(--text-3)"
+                  strokeDasharray="1 3"
+                  strokeOpacity={0.8}
+                  label={{ value: d.events.join("·"), position: "insideBottomLeft", fill: "var(--text-3)", fontSize: 10 }}
+                />
+              ))}
             <ReferenceLine
-              x={Number(today.slice(8))}
+              x={today}
               stroke="var(--text-3)"
               strokeDasharray="2 3"
               label={{ value: "Today", position: "insideTopRight", fill: "var(--text-3)", fontSize: 11 }}
@@ -159,7 +194,19 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function LegendItem({ color, label, dashed, thin }: { color: string; label: string; dashed?: boolean; thin?: boolean }) {
+function LegendItem({
+  color,
+  label,
+  dashed,
+  thin,
+  dotted,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+  thin?: boolean;
+  dotted?: boolean;
+}) {
   return (
     <span className="inline-flex items-center gap-2">
       <svg width="20" height="8" aria-hidden>
@@ -170,7 +217,7 @@ function LegendItem({ color, label, dashed, thin }: { color: string; label: stri
           y2="4"
           stroke={color}
           strokeWidth={thin ? 1.5 : 2}
-          strokeDasharray={dashed ? "5 3" : undefined}
+          strokeDasharray={dashed ? "5 3" : dotted ? "1 3" : undefined}
           strokeLinecap="round"
         />
       </svg>
