@@ -30,7 +30,8 @@
    (`SYNC_LOCK_MINUTES` = 6, longer than the cron's 300 s limit) can be taken over. A concurrent page run returns
    `skipped`; the cron waits up to 70 s for the lock, then skips if today's run already finished ok. Leftover
    `running` rows from killed runs are closed as `error`. A page-triggered run (`needsSync()`: from
-   `PAGE_SYNC_FROM_SGT` = 10:30, no `ok` run today, no run started in the last 15 min) reads at most 4 outcome
+   `PAGE_SYNC_FROM_SGT` = 10:30, no run started in the last 15 min, and either no `ok` run today or some pair in
+   `TARGETS` has no `ensemble` forecast made today, e.g. after a deploy that added a pair) reads at most 4 outcome
    statements and postpones the version backtest if less than 35 s are left.
 2. **Market data.** Frankfurter `USD → EUR, JPY, GBP, CNY` time series → `usd_basket` = mean of the logs
    (rises when the USD strengthens): 420 days while there are < 200 rows, otherwise 45. Cross-check "today"
