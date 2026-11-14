@@ -14,10 +14,11 @@
  Fed FOMC page/JSON ─┤         ▼               ▼              ▼             ▼         │
  CBSL review list/PDF┤  rates_history   prediction_errors  model_stats   predictions ─┘
  CBSL RSS ───────────┤  live_quotes     (the delta table)  (+ event ratios)  (band widened
- US Treasury CSV ────┤  market_data                                           around events)
- FRED Brent CSV ─────┤  (+ ust2y, brent,
- CBSL rates / xlsx ──┘   lk_* Sri Lanka series)
-                        events, source_health
+ BLS schedule ───────┤  market_data                                           around events)
+ US Treasury CSV ────┤  (+ ust2y, brent, usd_broad,
+ FRED Brent/DTWEXBGS ┤   lk_* Sri Lanka series)
+ CBSL rates / xlsx ──┘  events, source_health,
+                        model_versions, learning_log
                                │
                                ▼
               app/page.tsx ◀── lib/dashboard.ts (read-only queries + 5-min cached live quote)
@@ -49,9 +50,9 @@
    nested loops (13 min instead of 8 s).
    Then **Sri Lanka series** (`SRI_LANKA_SERIES` in `lib/sources/srilanka.ts`): CBSL's daily indicative USD/LKR
    (`lk_usd_spot`) and SGD/LKR (`lk_sgd_ind`) via its rate-lookup form, and monthly policy rate (`lk_opr`),
-   3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`) and tourism earnings (`lk_tourism`) from
-   CBSL's statistical .xlsx tables (read by the dependency-free `srilanka-xlsx.ts`). Health rows `cbsl-fx`,
-   `cbsl-rates`, `cbsl-external`.
+   3-month T-bill (`lk_tbill3m`), workers' remittances (`lk_remit`), tourism earnings (`lk_tourism`) and Colombo
+   CPI inflation (`lk_ccpi_yoy`, context only) from CBSL's statistical .xlsx tables (read by the dependency-free
+   `srilanka-xlsx.ts`). Health rows `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices`.
 5. **Replay missed days.** Pairs run in `PREDICT_ORDER` (SGD→USD, USD→LKR, then SGD→LKR, whose `cross` model
    reads the legs' `ensemble` rows for the same anchor). For each day `t` in the last 365 days
    (`BACKFILL_DAYS`) with no `ensemble` forecast (all of them on first run, or gaps if the cron missed a day),
@@ -107,8 +108,9 @@ detected non-trading weekdays (`calendar.ts`; Sunday's Wise point repeats Saturd
 ```
 US Treasury daily par yield CSV (per year, "2 Yr" column) ─┐                    factorsAt(all, t):
 FRED fredgraph.csv?id=DCOILBRENTEU ────────────────────────┼─▶ ingestMacro ─▶ market_data ─▶ each series ≤ t − lagDays
-                                                           │   (runSync 1a)   ust2y, brent        │
-                                     source_health: treasury, fred-brent                          ▼
+FRED fredgraph.csv?id=DTWEXBGS ────────────────────────────┘   (runSync 1a)   ust2y, brent,       │
+                                     source_health: treasury, fred-brent,     usd_broad           ▼
+                                                    fred-usd-broad
                                                                       macro model (ModelContext.factors)
                                                                       lib/dashboard.ts `.macro` → Market context card
 ```
@@ -158,9 +160,15 @@ CBSL rss.xml ──────────┘                                  
 | `cbsl-mpr` | CBSL Monetary Policy Review list: date from each PDF name `press_YYYYMMDD_Monetary_Policy_Review_…pdf` | `parseCbslList` | previous review's date (each statement names the next), else event − 56 days |
 | `cbsl-mpr` (next) | the latest review PDF: "The release of the next regular statement … will be on 20 November 2026" | `pdfText` (built-in `node:zlib`, no dependency) + `parseCbslNextDate` on whitespace-free text | the latest review's date |
 | `cbsl-rss` | CBSL press releases whose titles mention the IMF / EFF / staff-level agreement | `parseCbslRss`, dated in Asia/Colombo | event date (after the fact only) |
+| `bls` | BLS release schedule `bls.gov/schedule/YYYY/home.htm`, years y−2 … y+1: "Consumer Price Index" → `us_cpi`, "Employment Situation" → `us_jobs` (exact names) | `parseBlsSchedule` (`date-cell` + `desc-cell` rows) | Dec 1 of the previous year if the day is in the usual range (CPI 10–15, jobs 1–10), else date − 7 (rescheduled release) |
 
 Rows are de-duplicated on `(kind, event_date)` and upserted with `known_since = LEAST(old, new)`. `kind` values
-(`fomc`, `cbsl_policy`, `imf`) are data, like model names: never rename them.
+(`fomc`, `cbsl_policy`, `imf`, `us_cpi`, `us_jobs`) are data, like model names: never rename them.
+
+`EVENT_KINDS[kind].widens`: only `fomc`, `cbsl_policy` and `imf` widen the band. `us_cpi` / `us_jobs` are
+display-only (their ratio is still learned and shown): the 14 Nov 2026 backtest found their windows already
+covered (SGD→USD 80–88%), and widening pushed them to 87–100%. Only `OUTCOME_KINDS` (`fomc`, `cbsl_policy`, `imf`)
+get an outcome.
 
 **Band math** (pure, used identically by replay and the live forecast)
 
@@ -168,10 +176,10 @@ Rows are de-duplicated on `(kind, event_date)` and upserted with `known_since = 
   02:00 UTC) shows up by the E+1 point. The measured move is the 2-day log move `ln(rate(E+1)/rate(E−1))`,
   which is robust to which side of midnight it lands on.
 - `learnEventVol(rates, events, asOf)`: over the last 730 days, `base2` = mean squared 2-day move around every
-  ordinary **weekday** (Wise repeats Friday's value at weekends) that is not within ±2 days of an event
-  (needs ≥ 60 samples). For each kind, with n events whose window closed by `asOf` (E+1 ≤ asOf):
+  ordinary **weekday** (Wise repeats Friday's value at weekends) that is not within ±2 days of a band-widening
+  event (needs ≥ 60 samples), so display-only kinds leave the band exactly as it is without them. For each kind, with n events whose window closed by `asOf` (E+1 ≤ asOf):
   `ratio = (Σ move² + 6·base2) / (n + 6) / base2`, floored at 1, and forced to 1 when n < 4.
-- `eventExtraVar(events, stats, anchor, target)`: for each event known at the anchor (`known_since ≤ anchor`)
+- `eventExtraVar(events, stats, anchor, target)`: for each event of a widening kind known at the anchor (`known_since ≤ anchor`)
   with `anchor ≤ E` and `E+1 ≤ target`, add `(ratio − 1) · base2` once. The engine sets
   `σ' = √(σ² + extra)`. Each event is counted once per forecast row however long the horizon is.
 - Result: horizons after an event get a wider band; horizons before it, and the point forecast, are unchanged.
@@ -232,6 +240,15 @@ outcome (`COALESCE(events.outcome, EXCLUDED.outcome)`).
 - After the live forecast, `learningChanges` compares today's `LearnedStats` with the previous stored day's and
   appends promotions/demotions (per bucket, model or `bias_correction`, with the paired t) to `learning_log`.
 - Dashboard: `.versions` (last 10) and `.learningLog` (last 30) feed the "Model versions and learning log" card.
+- Stored so far: `2026.11.13` (skill USD 1.0000 / USDLKR 1.0009 / LKR 0.9930) and `2026.11.14` (broad dollar
+  index, `arima`, recency-weighted band, display-only CPI/jobs: 1.0000 / 1.0000 / 0.9934, "same" for all three).
+  `learning_log` is still empty: nothing has been promoted or demoted in a live run yet.
+
+## Live quote (`lib/sources/wise.ts`)
+
+`parseWiseComparison` (pure) reads Wise's comparison API. The mid rate is always **Wise's own quote**; another
+provider flagged `isConsideredMidMarketRate` (Remitly is, for USD→LKR) is only a fallback if Wise is missing.
+Before 2026-11-14 the first flagged provider in the list won, which could show Remitly's rate as "Wise".
 
 ## Read path (`lib/dashboard.ts`)
 

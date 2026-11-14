@@ -21,7 +21,9 @@ services, no second cron. Events only widen the band. They never move the point 
    wrapper returning `SourceResult` (`{ source, events, error?, note? }`). Use `getText`/`getBytes`/`getJSON`
    from `http.ts`, and `pdfText` + `compact` for PDFs. Wrap everything in try/catch. Parsing 0 rows is an
    `error`. "Nothing new yet" is a `note`.
-3. **Kind.** Add to `EVENT_KINDS` in `lib/predict/events.ts` (`label`, `short` ≤ 5 chars for the chart).
+3. **Kind.** Add to `EVENT_KINDS` in `lib/predict/events.ts` (`label`, `short` ≤ 5 chars for the chart,
+   `widens`). Use `widens: true` only if the backtest shows the band under-covers on those days; otherwise
+   make it display-only (`widens: false`), like `us_cpi` / `us_jobs` (BLS schedule): widening on them over-covered.
    Kinds are stored data: never rename one later. Reuse an existing kind if it's the same institution/decision.
 4. **`known_since`**: the first day the date was really public. Be conservative. Too early = look-ahead in
    replay; too late only loses a little band widening. Write the rule and its approximation into `events.md`.

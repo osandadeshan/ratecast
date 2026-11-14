@@ -20,7 +20,9 @@ official rate may deserve its own model, like `cbsl_gap`.
    (Node fetch) works.
 2. **Parser** in `lib/sources/macro.ts`: a pure `parseX(text): Point[]` plus `fetchX()` using `getText` (generous
    timeout for slow hosts). Find columns by header name, skip blanks and `.`, and throw if 0 points.
-3. **Config**: add `{ series, label, lagDays, transform }` to `MACRO_FACTORS` in `lib/config.ts`.
+3. **Config**: add `{ series, label, lagDays, transform }` to `MACRO_FACTORS` in `lib/config.ts`. Add
+   `pairs: [...]` to limit it to the pairs it helped in the backtest (e.g. `usd_broad`, FRED DTWEXBGS, lag 10,
+   is SGD→USD only). The broad dollar index already covers "DXY": don't add a second dollar index.
    - `lagDays` = observed delay from the value's date until it is reliably out before the 09:30 SGT sync. Round
      up. Never tune it on backtest results.
    - `transform`: `diff` for rates/yields (pp), `log` for prices/indices.

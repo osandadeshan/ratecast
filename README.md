@@ -192,13 +192,14 @@ flowchart TD
 | Step | Reads | Writes | Notes |
 |---|---|---|---|
 | **1. Market data** | Frankfurter, ExchangeRate-API, Currency-API | `market_data` | USD strength = average of log(EUR, JPY, GBP, CNY per USD); rises when the dollar strengthens |
-| **1a. Macro factors** | Treasury yield CSV, FRED Brent CSV, CBSL rate lookup + statistical .xlsx | `market_data` (`ust2y`, `brent`, `lk_*`), `source_health` (`treasury`, `fred-brent`, `cbsl-fx`, `cbsl-rates`, `cbsl-external`) | Same failure model as 1b (shared `recordHealth` helper). A missing factor just means the model using it falls back to "no change" |
-| **1b. Policy events** | Fed page + JSON, CBSL review list + latest PDF, CBSL RSS; then each past event's own statement (FOMC HTML, CBSL review PDF) | `events` (incl. `outcome`), `source_health` (incl. `outcomes`) | Each source fails on its own: a failure is logged and recorded in `source_health`, never fails the sync. Outcomes: past events with no outcome (last ~800 days), newest first, at most 32 statements per run |
+| **1a. Macro factors** | Treasury yield CSV, FRED Brent + broad dollar index CSV, CBSL rate lookup + statistical .xlsx | `market_data` (`ust2y`, `brent`, `usd_broad`, `lk_*`), `source_health` (`treasury`, `fred-brent`, `fred-usd-broad`, `cbsl-fx`, `cbsl-rates`, `cbsl-external`, `cbsl-prices`) | Same failure model as 1b (shared `recordHealth` helper). A missing factor just means the model using it falls back to "no change" |
+| **1b. Policy events** | Fed page + JSON, CBSL review list + latest PDF, CBSL RSS, BLS release schedule (US CPI, jobs report); then each past event's own statement (FOMC HTML, CBSL review PDF) | `events` (incl. `outcome`), `source_health` (incl. `outcomes`) | Each source fails on its own: a failure is logged and recorded in `source_health`, never fails the sync. Outcomes: past events with no outcome (last ~800 days), newest first, at most 32 statements per run |
 | **2. Wise rates** | Wise history, Wise comparisons | `rates_history`, `live_quotes` | History rows are `source='wise'` (official). Today's live rate goes in as `source='wise_live'` (provisional) and is replaced by the official value once Wise publishes it |
 | **3. Score** | `predictions` + official `rates_history` | `prediction_errors` | For each forecast: predicted, actual, delta = actual − predicted, % miss. Only official rates count as "actual". One INSERT…SELECT with nested loops disabled (after a big replay the planner otherwise picked a plan that took 13 min instead of 8 s) |
 | **4. Fill gaps** | stored rates, errors | `predictions` | On first deploy this replays 365 days (40 s per run, resumed on the next run until done), so the learner starts with real statistics. Afterwards it only fills days the cron missed |
-| **5. Learn + forecast** | rates, ECB series, macro + CBSL factors, errors, events + outcomes, the legs' forecasts | `model_stats`, `predictions` | 11 models × 31 days ahead, blended with learned weights. Every model except the random walk gets weight 0 until it is statistically better than the random walk in that horizon bucket. Known events widen the 80% range (step 4's replay does the same, using only events public on each day). Re-running on the same day overwrites that day's forecast |
-| **6. Housekeeping** | | `sync_runs` | Deletes predictions older than ~400 days and quotes older than 60 days, to stay within Neon's free 0.5 GB |
+| **5. Learn + forecast** | rates, ECB series, macro + CBSL factors, errors, events + outcomes, the legs' forecasts | `model_stats`, `predictions` | 12 models × 31 days ahead, blended with learned weights. Every model except the random walk gets weight 0 until it is statistically better than the random walk in that horizon bucket. Known Fed/CBSL/IMF events widen the 80% range (step 4's replay does the same, using only events public on each day); US CPI/jobs days are shown only. Forecasts are **write-once**: a second run on the same day keeps the first forecast. Promotions/demotions go to `learning_log` |
+| **5b. Version backtest** | everything above, in memory | `model_versions` | Once per `MODEL_VERSION`: replays the deployed code over 365 days (scored on the last 300), compares skill vs the random walk with the previous version (±0.5% = same). Time-boxed (50 s page-triggered, 240 s cron) |
+| **6. Housekeeping** | | `sync_runs` | Prunes per-model prediction rows after 550 days (`ensemble` and `naive` are kept forever) and quotes after 60 days, to stay within Neon's free 0.5 GB |
 
 ---
 
@@ -274,7 +275,8 @@ Every model works on log rates and forecasts 1 to 31 days ahead from today's rat
 | **Sri Lanka data** (`lanka`, *shadow*, LKR pairs) | The same ridge factor model on CBSL inputs (`LANKA_FACTORS` in `lib/config.ts`): gap between CBSL's fixing and the Wise rate, CBSL's 5-day USD/LKR move, policy-rate and T-bill changes, year-on-year remittances and tourism. Each input has its own publication lag, staleness limit and fade | Local fundamentals that move LKR (dollar inflows, rates) |
 | **Gap to CBSL rate** (`cbsl_gap`, *shadow*, LKR pairs) | For each horizon, a regression (365 days, shrunk toward 0) of how far Wise moved on yesterday's gap ln(CBSL fixing / Wise rate). Forecast = today + β × today's gap | Wise tends to drift toward the central bank's own rate. Best candidate so far: −2.3% error for SGD→LKR at 8–14 days, not yet significant |
 | **Two-part** (`cross`, *shadow*, SGD→LKR) | Today's SGD→LKR moved by the final forecasts of SGD→USD and USD→LKR, made the same day | ~73% of SGD→LKR's daily movement comes from USD→LKR, and the two legs are almost uncorrelated, so each leg is learned on its own |
-| **US yields + oil** (`macro`, *shadow*) | Ridge regression (no intercept, λ = n) of the pair's daily move on the 5-day move of the US 2-year yield (lagged 1 day) and Brent (lagged 9 days), fitted on the last 250 days. Future factor moves count as zero, so its effect fades within about a week | Slow pass-through, e.g. oil → Sri Lanka's import bill → LKR. **Runs in shadow mode**: it failed the backtest, so it gets weight 0 until it proves itself (see below) |
+| **AR on daily returns** (`arima`) | ARIMA(p,1,0): autoregression on 250 days of daily moves, order 0–5 picked by BIC, shrunk, only stable fits. Order 0 is the random walk | Tests short-term momentum/reversal. 14 Nov 2026: equal to the random walk for SGD→USD, worse for USD→LKR, 1.3–1.6% better for SGD→LKR at 8–31 days (not significant, so weight 0) |
+| **US yields, oil, dollar index** (`macro`, *shadow*) | Ridge regression (no intercept, λ = n) of the pair's daily move on the 5-day move of the US 2-year yield (lagged 1 day), Brent (lagged 9 days) and, for SGD→USD only, the Fed broad dollar index (lagged 10 days), fitted on the last 250 days. Future factor moves count as zero, so its effect fades within about a week | Slow pass-through, e.g. oil → Sri Lanka's import bill → LKR. **Runs in shadow mode**: it failed the backtest, so it gets weight 0 until it proves itself (see below) |
 
 They're combined into:
 
@@ -294,7 +296,7 @@ flowchart LR
     C --> D["Learner, last 180 days of deltas,<br/>per horizon bucket, Sundays skipped"]
     D --> D1["Model weights<br/>only models proven better than<br/>'no change' get any weight"]
     D --> D2["Bias correction<br/>only if proven helpful, ≤ 7 days"]
-    D --> D3["80% range width<br/>80th percentile of recent misses"]
+    D --> D3["80% range width<br/>80th percentile of misses,<br/>recent ones weighted more (30-day half-life)"]
     D1 --> N["Next forecast"]
     D2 --> N
     D3 --> N
@@ -341,7 +343,7 @@ and the replay. This holds for live runs and for the 365-day replay, so backtest
 
 ---
 
-## Policy events (Fed, CBSL)
+## Policy events (Fed, CBSL, US data releases)
 
 Nobody knows a central bank's decision in advance, so events **never move the predicted number**. They
 only widen the 80% range on days where this currency pair has historically moved more than usual.
@@ -352,6 +354,10 @@ Everything is read automatically; no dates are entered by hand.
 | US Fed decision (`fomc`) | FOMC calendar page (includes next year) | Same page + Fed calendar JSON |
 | CBSL policy review (`cbsl_policy`) | The latest review PDF: *"the next regular statement … will be on 20 November 2026"* | File names on the CBSL review list (`press_YYYYMMDD_…`) |
 | IMF / Sri Lanka (`imf`) | (not available) | CBSL RSS items mentioning the IMF, recorded after the fact |
+| US inflation (`us_cpi`), US jobs report (`us_jobs`) | BLS release schedule pages (next year once BLS publishes it) | Same pages, two years back |
+
+US CPI and jobs-report days are **shown only** (`widens: false`): in the 14 Nov 2026 backtest the 80% range
+already held 80–88% of actual SGD → USD rates on those days, and widening pushed it to 87–100%.
 
 How the range is widened (`lib/predict/events.ts`, pure):
 
@@ -415,7 +421,7 @@ erDiagram
         timestamptz fetched_at
     }
     market_data {
-        text series PK "usd_basket, ust2y, brent, lk_*, xc:CUR:source"
+        text series PK "usd_basket, ust2y, brent, usd_broad, lk_*, xc:CUR:source"
         date date PK
         float value
     }
@@ -429,6 +435,9 @@ erDiagram
         float predicted
         float lower80
         float upper80
+        text origin "live or replay"
+        text model_version
+        timestamptz created_at
     }
     prediction_errors {
         bigint prediction_id PK, FK
@@ -449,7 +458,7 @@ erDiagram
         jsonb stats "weights, bias, range"
     }
     events {
-        text kind PK "fomc, cbsl_policy, imf"
+        text kind PK "fomc, cbsl_policy, imf, us_cpi, us_jobs"
         date event_date PK
         date known_since "no-look-ahead gate"
         text source
@@ -465,11 +474,29 @@ erDiagram
         text last_note
         int last_count
     }
+    model_versions {
+        text version PK
+        date first_run
+        date backtest_on
+        jsonb backtest "skill and coverage per pair and bucket"
+        text previous
+        jsonb comparison "better, same or worse"
+    }
+    learning_log {
+        text currency PK
+        date as_of PK
+        int bucket PK
+        text item PK "model or bias_correction"
+        text change "promoted or demoted"
+        float t_stat
+        text model_version
+    }
     sync_runs {
         bigint id PK
         date run_date
         text status
         text message
+        text model_version
         timestamptz started_at
         timestamptz finished_at
     }
@@ -591,7 +618,7 @@ npm run dev       # http://localhost:3000
 
 ## Accuracy: what to expect
 
-Backtest on 13 Nov 2026: 365-day no-look-ahead replay, forecasts made in the last 300 days, Sundays excluded,
+Backtest on 13 Nov 2026 (the 14 Nov version `2026.11.14` gives the same point forecasts): 365-day no-look-ahead replay, forecasts made in the last 300 days, Sundays excluded,
 average miss (%), final forecast vs "no change":
 
 | | 1 day | 2–7 days | 8–14 days | 15–31 days |
@@ -604,7 +631,11 @@ Before the significance gate (12 Nov 2026) the forecast was *worse* than "no cha
 15% for SGD → USD at 15–31 days). Now no model has proven itself, so the forecast equals "no change". That's
 the honest floor; candidates keep being scored and are switched on automatically if they prove better. The
 closest are `cbsl_gap` for SGD → LKR (−2.3% at 8–14 days) and `macro` for USD → LKR at 15–31 days (−0.9%).
-80% ranges hold 78–96% of actual rates depending on pair and horizon.
+80% ranges (version `2026.11.14`, weighted toward recent misses) hold 81.6% of actual rates overall for
+SGD → USD, 78.9% for SGD → LKR and 70.7% for USD → LKR (66% at 15–31 days: its misses come in regimes).
+
+Also tested and rejected (14 Nov 2026, offline, same window): Prophet was 2–6× worse than "no change" at every
+horizon, XGBoost lost in 13 of 15 pair/horizon cells. Neither was added.
 
 Exchange rates are close to unpredictable; matching "no change" is about as good as FX forecasting
 realistically gets. The page always shows the current numbers next to the baseline.
@@ -625,7 +656,11 @@ This is **not financial advice**.
   technically breaks the "no worse in every bucket" rule by 0.0006 pp. The owner accepted this on
   11 Nov 2026 and kept automatic promotion: the slip is noise-sized, and a model that stops beating the
   random walk drops back to shadow by itself.
-- Brent from FRED runs ~1 week late, so the oil signal is always stale by design (lag 9 days).
+- Brent from FRED runs ~1 week late, so the oil signal is always stale by design (lag 9 days). The broad dollar
+  index is weekly (lag 10 days).
+- Colombo CPI is shown but not yet a model input: CBSL's sheet only holds 13 months, so history builds up
+  day by day.
+- USD → LKR 80% ranges under-cover (about 71% overall, 66% at 15–31 days).
 - `home.treasury.gov` is sometimes slow (up to ~19 s per CSV); the first sync fetches 3 years and can take
   about a minute.
 - The `news` model (post-announcement drift) never got promoted in the 11 Nov 2026 backtest; the ensemble was

@@ -14,8 +14,10 @@
   `events.md` (lib/sources/events.ts, lib/sources/pdf.ts, lib/predict/events.ts), `macro.md` (lib/sources/macro.ts, lib/sources/srilanka.ts, lib/sources/srilanka-xlsx.ts, lib/config.ts).
 - **Project skills** in `.claude/skills/`:
   - `run-locally`: start Postgres, sync, dev server, screenshot check.
-  - `backtest`: reset forecasts, replay (now 365 days, three pairs, scored on the last
-    300 days with Sundays excluded), compare every model to the random walk. The skill text still says 90 days.
+  - `backtest`: compare every model to the random walk. For the current code use `npm run backtest`
+    (in-memory, read-only, ~30 s: 365 days replayed, last 300 scored, Sundays excluded, three pairs). The
+    sync stores the same backtest once per `MODEL_VERSION` in `model_versions`. Older sections of the
+    skill still say 60/90 days: use 300 scored days.
   - `verify-deploy`: post-deploy checks on Vercel (live quote, cron, first sync).
   - `add-currency`: add a new target currency end to end.
   - `add-event-source`: add a new automatic policy-event scraper (kind, parser, health, backtest).

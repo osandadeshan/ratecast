@@ -324,12 +324,12 @@ differ slightly from the table above. First stored run (`2026.11.13`), MAE % fin
   current live rate using the day's stored weights. Keeps "Tomorrow" fresh without full syncs. Full sync on
   every visit was rejected (free-tier compute, Wise blocking risk, no accuracy gain).
 - Fallback live rate from cross-check sources when Wise fails.
-- A USD/LKR-specific signal (CBSL publishes rates, but no free stable API was found). CBSL's Weekly Economic
-  Indicators PDF (reserves, net USD purchases) can now be parsed with `lib/sources/pdf.ts`.
+- CBSL weekly reserves and net USD purchases: only in the Weekly Economic Indicators PDF, which the `node:zlib`
+  reader can't extract yet. (CBSL daily fixings, policy rate, T-bill, remittances, tourism and Colombo CPI are
+  already ingested.)
 - "What moved the forecast today" (from the policy-events plan).
 - Colombo CPI as a `lanka` input once ~2 years of `lk_ccpi_yoy` are stored. Polymarket/Kalshi Fed odds if `macro`
   ever gets promoted. Headline sentiment (GDELT) if it becomes reachable and a longer history is available.
-- Weekday-aware evaluation that skips weekend duplicates.
 - Email/notification when tomorrow's forecast moves > x% (would need a free mail provider).
 
 ## Environment

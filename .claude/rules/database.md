@@ -21,7 +21,7 @@ paths:
   |---|---|---|
   | `rates_history` | ingest | `source` = `wise` (official) or `wise_live` (provisional today) |
   | `live_quotes` | ingest | provider comparison JSON, pruned after 60 days |
-  | `market_data` | ingest | `usd_basket`, `xc:<CUR>:<source>` cross-checks, `ust2y` (Treasury 2y %, US date), `brent` (FRED USD/bbl), CBSL `lk_usd_spot`, `lk_sgd_ind` (daily fixings), `lk_opr`, `lk_tbill3m` (%), `lk_remit`, `lk_tourism` (USD mn, dated to month start) |
+  | `market_data` | ingest | `usd_basket`, `xc:<CUR>:<source>` cross-checks, `ust2y` (Treasury 2y %, US date), `brent` (FRED USD/bbl), `usd_broad` (FRED DTWEXBGS index, SGD→USD macro input), CBSL `lk_usd_spot`, `lk_sgd_ind` (daily fixings), `lk_opr`, `lk_tbill3m` (%), `lk_remit`, `lk_tourism` (USD mn, dated to month start), `lk_ccpi_yoy` (Colombo CPI YoY %, context only, source `cbsl-prices`) |
   | `predictions` | predict | unique (currency, made_on, target_date, model); **write-once** (`DO NOTHING`). `origin` live/replay, `model_version`. `ensemble`/`naive` kept forever, other models pruned after 550 days |
   | `prediction_errors` | evaluate SQL | the delta table; FK cascade from predictions |
   | `model_stats` | predict | JSON of `LearnedStats` per currency per day |

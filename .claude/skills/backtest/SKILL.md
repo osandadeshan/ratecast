@@ -7,6 +7,12 @@ description: Re-run RateCast's 365-day no-lookahead replay against the local dat
 
 Uses the local DB only (`ratecast-pg`). **Never run the reset against production.**
 
+**Quick check first:** `npm run backtest` (sandbox: `node --import tsx --env-file=.env.local scripts/backtest.ts`)
+replays the current code in memory (365 days, last 300 scored, Sundays excluded, three pairs) and prints
+ensemble vs random-walk MAE, skill and 80% coverage per bucket. Nothing is written. It is the same backtest the
+sync stores once per `MODEL_VERSION` in `model_versions`. Use the full reset below only when you need
+per-model rows in `prediction_errors`.
+
 1. Make sure the DB is up and `.env.local` points to localhost (`grep localhost .env.local`). Stop if it doesn't.
 2. Reset learned state (rates history is kept):
    ```bash
