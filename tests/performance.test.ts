@@ -36,6 +36,8 @@ test("metrics: MAPE, RMSE, MAE and the baseline on the same dates", () => {
   near(w7.rmse!, Math.sqrt((1 + 4) / 2));
   near(w7.mae!, 1.5);
   near(w7.naiveMape!, 2);
+  near(w7.naiveRmse!, Math.sqrt((0 + 16) / 2));
+  near(w7.naiveMae!, 2);
 });
 
 test("non-trading weekdays and future targets are left out", () => {

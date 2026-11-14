@@ -42,10 +42,11 @@ only gets weight once it is statistically better than the random walk ("no chang
 
 | | |
 |---|---|
-| **Today's rate** | Wise mid-market rate for 1 SGD → LKR, 1 SGD → USD and 1 USD → LKR (three tabs), with the change since yesterday |
-| **Same day last month** | Rate on this date last month and how far it has moved since |
-| **Tomorrow & month-end forecast** | Forecast with an 80% likely range |
-| **Whole-month view** | Chart and day-by-day table: actual for past days, forecast for future days, and last month's rate for comparison |
+| **Today's rate** | Wise mid-market rate for 1 SGD → LKR, 1 SGD → USD and 1 USD → LKR (three tabs), with the change since the last official point (shown only when the live quote is today's; otherwise "Latest" and its date). The pair is kept in the URL (`#sgd-lkr`, `#sgd-usd`, `#usd-lkr`) |
+| **Same day last month** | Rate on this date last month and how far it has moved since (the month's last day when last month was shorter) |
+| **Tomorrow & month-end forecast** | Forecast with an 80% likely range, and the random walk ("no change") beside tomorrow's |
+| **Whole-month view** | Chart and day-by-day table: actual for past days, forecast for future days, and last month's rate for comparison. In the first or last week of a month it shows 10 days either side of today |
+| **What moved the forecast** | The 7-day-ahead forecast vs the one made the run before, split into the new starting rate and the models, with the 80% range width |
 | **Provider comparison** | What the recipient gets for 1,000 SGD (1,000 USD on the USD → LKR tab) via Wise and other popular providers (Wise's comparison API, `numberOfProviders=3`) |
 | **Market context** | 30-day trend, volatility, US-dollar strength (ECB), US 2-year yield, Brent oil and the Fed broad dollar index (latest value + 30-day change), and cross-checks against two other rate sources. On the LKR tabs also the Sri Lanka central bank (CBSL) series: official USD/LKR and SGD/LKR rates, policy rate, 3-month T-bill yield, remittances and tourism earnings (year-on-year), Colombo CPI inflation |
 | **Policy events** | Upcoming and recent US Fed (FOMC) and Central Bank of Sri Lanka decisions, read automatically, with what was decided (cut / hold / hike) read from each statement. They widen the 80% range where such days have historically moved the rate more; markers on the chart. US CPI and jobs-report days are shown too, without widening (the backtest showed the range already covers them) |
@@ -53,7 +54,7 @@ only gets weight once it is statistically better than the random walk ("no chang
 | **Forecast performance** | Yesterday's forecast vs actual, today's forecast vs the live rate; MAPE, RMSE and MAE over 7/30/90 days next to the random walk; error by horizon (1/7/14/30 days) with how often the actual fell inside the 80% range; bias (too high/too low, only when statistically clear); improving/deteriorating vs the baseline; 30-day outlook (a direction only when today's rate is outside the forecast's 80% range); model version, training date, history coverage, live vs replayed forecast counts and the hardest pair |
 | **Model versions and learning log** | Each forecasting-code version is backtested automatically on its first run (last year replayed, scored vs the random walk) and compared with the previous version; every time the learner switches a model or the bias correction on or off is logged with its t-statistic |
 | **Data sources** | Freshness of every ingested series (first/latest date, late flag), scraper health, and the sources deliberately not integrated, with the reason |
-| **Light & dark mode, mobile friendly** | Works at phone width (390px) |
+| **Light & dark mode, mobile friendly** | Auto / light / dark toggle (remembered), keyboard-accessible tabs, works at phone width (390px) |
 
 ---
 
@@ -101,8 +102,8 @@ flowchart LR
 Two separate paths:
 
 - **Write path (sync):** about once a day. Collects data, scores old forecasts, re-learns, writes new forecasts.
-- **Read path (page view):** every visit. Reads what the sync stored and adds a live Wise rate that is at
-  most 5 minutes old.
+- **Read path (page view):** every visit. Reads what the sync stored (cached up to 5 minutes and cleared after
+  each sync) and adds a live Wise rate that is at most 5 minutes old.
 
 ---
 
@@ -209,6 +210,7 @@ flowchart TD
 | Data | Refreshed | Why this frequency |
 |---|---|---|
 | **Live Wise rate & provider comparison** (Today card, Send 1,000 SGD / USD card) | On page view, cached **5 minutes**; also stored by each sync | The only number that genuinely changes minute to minute. A 5-minute cache keeps it current without calling Wise on every visit (avoids rate limits and blocking) |
+| **Page data** (everything read from the database) | Cached **5 minutes**, cleared as soon as a sync finishes | Keeps the database idle between syncs; clearing on sync means new forecasts appear at once |
 | **Official daily rates** (past days in the month view) | Each sync (≈ daily) | Wise publishes one official point per day. Re-fetching 3 months also picks up any corrections |
 | **ECB dollar-strength series** | Each sync | ECB publishes once per business day |
 | **Cross-check rates** | Each sync | Sanity check of Wise; daily is plenty |
@@ -537,6 +539,7 @@ app/
   components/
     DashboardView.tsx       All page sections (cards, table, learning panel)
     MonthChart.tsx          Month chart (Recharts)
+    ThemeToggle.tsx         Auto / light / dark switch
   api/
     cron/sync/route.ts      Daily cron endpoint
     dashboard/route.ts      JSON API

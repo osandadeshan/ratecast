@@ -1,15 +1,41 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { MODEL_LABELS } from "@/lib/config";
 import type { CurrencyDashboard, Dashboard } from "@/lib/dashboard";
 import { fmt, pct, shortDate, weekday } from "@/lib/format";
 import { EVENT_KINDS } from "@/lib/predict/events";
-import { MODEL_LABELS } from "@/lib/predict/models";
 import MonthChart from "./MonthChart";
+import ThemeToggle from "./ThemeToggle";
 
 export default function DashboardView({ data }: { data: Dashboard }) {
   const [tab, setTab] = useState(0);
-  const choose = (i: number) => setTab(i);
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  // The selected pair lives in the URL hash (#usd-lkr), so a link opens the same tab.
+  const slug = (i: number) => data.currencies[i].label.toLowerCase().replace(/\s*→\s*/, "-");
+  useEffect(() => {
+    const read = () => {
+      const i = data.currencies.findIndex((_, k) => `#${slug(k)}` === window.location.hash);
+      if (i >= 0) setTab(i);
+    };
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const choose = (i: number, focus = false) => {
+    setTab(i);
+    history.replaceState(null, "", `#${slug(i)}`);
+    if (focus) tabs.current[i]?.focus();
+  };
+  // WAI-ARIA tabs: arrow keys, Home and End move between pairs.
+  const onKey = (e: React.KeyboardEvent) => {
+    const n = data.currencies.length;
+    const next = { ArrowRight: (tab + 1) % n, ArrowLeft: (tab - 1 + n) % n, Home: 0, End: n - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    choose(next, true);
+  };
   const c = data.currencies[tab];
 
   return (
@@ -22,12 +48,19 @@ export default function DashboardView({ data }: { data: Dashboard }) {
             misses.
           </p>
         </div>
-        <div role="tablist" aria-label="Target currency" className="inline-flex rounded-xl bg-surface-2 p-1 self-start">
+        <div className="flex items-center gap-2 self-start">
+        <div role="tablist" aria-label="Currency pair" className="inline-flex rounded-xl bg-surface-2 p-1" onKeyDown={onKey}>
           {data.currencies.map((cur, i) => (
             <button
               key={cur.target}
+              ref={(el) => {
+                tabs.current[i] = el;
+              }}
+              id={`tab-${cur.target}`}
               role="tab"
               aria-selected={i === tab}
+              aria-controls="pair-panel"
+              tabIndex={i === tab ? 0 : -1}
               onClick={() => choose(i)}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${
                 i === tab ? "bg-surface text-ink shadow-sm" : "text-ink-2 hover:text-ink"
@@ -36,6 +69,8 @@ export default function DashboardView({ data }: { data: Dashboard }) {
               {cur.label}
             </button>
           ))}
+        </div>
+        <ThemeToggle />
         </div>
       </header>
 
@@ -51,9 +86,17 @@ export default function DashboardView({ data }: { data: Dashboard }) {
           two.
         </Notice>
       )}
+      {data.dbConfigured && data.lastSync && !c.model.madeToday && (
+        <Notice>
+          Today&apos;s forecast hasn&apos;t been made yet: the daily update runs at about 09:30 SGT. Until then the forecasts
+          shown are from the latest earlier run.
+        </Notice>
+      )}
 
+      <div id="pair-panel" role="tabpanel" aria-labelledby={`tab-${c.target}`} className="space-y-6">
       <TodaySection c={c} />
       <ChartSection c={c} today={data.today} monthLabel={data.monthLabel} />
+      <MovedCard c={c} />
       <PerformanceCard c={c} hardest={data.hardest} codeVersion={data.modelVersion} />
       <div className="grid lg:grid-cols-5 gap-6">
         <div className="lg:col-span-3 space-y-6 min-w-0">
@@ -66,22 +109,28 @@ export default function DashboardView({ data }: { data: Dashboard }) {
         </div>
       </div>
       <LearningSection c={c} />
+      </div>
       <VersionsCard data={data} />
       <SourcesCard data={data} />
 
       <footer className="text-xs text-ink-3 pb-6 space-y-1">
         <p>
           Rates: Wise (history and comparisons). Cross-checks: ExchangeRate-API, Currency-API, CBSL official rates.
-          Market signals: ECB reference rates via Frankfurter, US Treasury yields, Brent oil (FRED), Central Bank of
-          Sri Lanka data (policy rate, T-bill yields, remittances, tourism). Policy calendars: US Federal Reserve,
-          Central Bank of Sri Lanka. Times in Singapore (SGT).
+          Market signals: ECB reference rates via Frankfurter, US Treasury yields, FRED (Brent oil, broad dollar
+          index), Central Bank of Sri Lanka data (policy rate, T-bill yields, remittances, tourism, Colombo CPI).
+          Calendars: US Federal Reserve, Central Bank of Sri Lanka, US Bureau of Labor Statistics (CPI, jobs report).
+          Times in Singapore (SGT).
           {data.lastSync && (
             <>
               {" "}
-              Last model run {new Date(data.lastSync.at).toLocaleString("en-SG", { timeZone: "Asia/Singapore" })} (
-              {data.lastSync.status}).
+              Last model run {data.lastSync.atLabel} ({data.lastSync.status}).
             </>
-          )}
+          )}{" "}
+          All data on this page as JSON:{" "}
+          <a href="/api/dashboard" className="underline hover:text-ink-2">
+            /api/dashboard
+          </a>
+          .
         </p>
         <p>Forecasts are statistical estimates, not financial advice. Exchange rates are close to unpredictable.</p>
       </footer>
@@ -105,12 +154,17 @@ function Stat({ label, value, sub, tone }: { label: string; value: string; sub?:
   );
 }
 
-function Change({ from, to }: { from: number | null | undefined; to: number | null | undefined }) {
+/**
+ * Rate change with an arrow. `neutral`: no colour (used for forecasts whose direction isn't significant,
+ * so a tiny predicted move isn't painted as good or bad news).
+ */
+function Change({ from, to, neutral }: { from: number | null | undefined; to: number | null | undefined; neutral?: boolean }) {
   if (!from || !to) return null;
   const p = (to / from - 1) * 100;
   const up = p > 0;
+  const flat = Math.abs(p) < 0.005;
   return (
-    <span className="num font-medium" style={{ color: Math.abs(p) < 0.005 ? "var(--text-2)" : up ? "var(--good-text)" : "var(--critical)" }}>
+    <span className="num font-medium" style={{ color: flat || neutral ? "var(--text-2)" : up ? "var(--good-text)" : "var(--critical)" }}>
       {Math.abs(p) < 0.005 ? "▬" : up ? "▲" : "▼"} {pct(p, 2)}
     </span>
   );
@@ -119,12 +173,15 @@ function Change({ from, to }: { from: number | null | undefined; to: number | nu
 function TodaySection({ c }: { c: CurrencyDashboard }) {
   const d = c.decimals;
   const live = c.live?.midRate ?? null;
+  // A cached quote from an earlier day is labelled with its date; changes and comparisons use today's only.
+  const now = c.liveIsToday ? live : null;
+  const tomorrowRw = live; // the random walk's forecast for tomorrow is the latest rate
   return (
     <section className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4" aria-label="Today">
       <div className="col-span-2 lg:col-span-1">
         <Stat
           tone="lead"
-          label={`Today · 1 ${c.base}`}
+          label={c.live && !c.liveIsToday ? `Latest · 1 ${c.base}` : `Today · 1 ${c.base}`}
           value={live ? `${fmt(live, d)}` : "—"}
           sub={
             live ? (
@@ -132,15 +189,16 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
                 {c.quote} · Wise mid-market
                 {c.live && (
                   <>
-                    {" "}· {new Date(c.live.fetchedAt).toLocaleTimeString("en-SG", { timeZone: "Asia/Singapore", hour: "2-digit", minute: "2-digit" })}
+                    {" "}· {c.liveIsToday ? c.liveTime : `${shortDate(c.live.date)} ${c.liveTime}`}
                     {c.liveSource === "db" && " (cached)"}
                   </>
                 )}
-                {c.previousClose && (
+                {now != null && c.previousClose && (
                   <div className="mt-1">
-                    <Change from={c.previousClose.rate} to={live} /> vs {shortDate(c.previousClose.date)}
+                    <Change from={c.previousClose.rate} to={now} /> vs {shortDate(c.previousClose.date)}
                   </div>
                 )}
+                {!c.liveIsToday && <div className="mt-1">Today&apos;s live rate couldn&apos;t be read.</div>}
               </>
             ) : (
               "Live rate unavailable"
@@ -149,12 +207,17 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
         />
       </div>
       <Stat
-        label="Same day last month"
+        label={c.lastMonthSameDay?.clamped ? "Last month (its last day)" : "Same day last month"}
         value={fmt(c.lastMonthSameDay?.rate, d)}
         sub={
           c.lastMonthSameDay ? (
             <>
-              {shortDate(c.lastMonthSameDay.date)} · now <Change from={c.lastMonthSameDay.rate} to={live} />
+              {shortDate(c.lastMonthSameDay.date)}
+              {now != null && (
+                <>
+                  {" "}· now <Change from={c.lastMonthSameDay.rate} to={now} />
+                </>
+              )}
             </>
           ) : (
             "No data yet"
@@ -166,7 +229,12 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
         value={fmt(c.tomorrow?.predicted, d)}
         sub={
           c.tomorrow?.lower80 != null ? (
-            <>80% range {fmt(c.tomorrow.lower80, d)} – {fmt(c.tomorrow.upper80, d)}</>
+            <>
+              80% range {fmt(c.tomorrow.lower80, d)} – {fmt(c.tomorrow.upper80, d)}
+              {tomorrowRw != null && (
+                <div className="mt-1 text-ink-3">Random walk (no change): {fmt(tomorrowRw, d)}</div>
+              )}
+            </>
           ) : (
             "Waiting for first model run"
           )
@@ -177,9 +245,19 @@ function TodaySection({ c }: { c: CurrencyDashboard }) {
         value={fmt(c.monthEnd?.predicted, d)}
         sub={
           c.monthEnd?.predicted != null ? (
-            <>
-              <Change from={live} to={c.monthEnd.predicted} /> from today
-            </>
+            now != null ? (
+              <>
+                <Change from={now} to={c.monthEnd.predicted} neutral={c.outlook !== "up" && c.outlook !== "down"} /> from
+                today
+                {c.monthEnd.lower80 != null && (
+                  <div className="mt-1 text-ink-3">
+                    80% range {fmt(c.monthEnd.lower80, d)} – {fmt(c.monthEnd.upper80, d)}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>forecast · today&apos;s rate not read yet</>
+            )
           ) : (
             "Last day of the month"
           )
@@ -198,7 +276,13 @@ function ChartSection({ c, today, monthLabel }: { c: CurrencyDashboard; today: s
         </h2>
         <span className="text-xs text-ink-3">Past days: actual Wise rate · future days: forecast</span>
       </div>
-      <MonthChart month={c.month} today={today} decimals={c.decimals} target={c.quote} />
+      {c.month.some((m) => m.actual !== null || m.predicted !== null) ? (
+        <MonthChart month={c.month} today={today} decimals={c.decimals} target={c.quote} />
+      ) : (
+        <p className="text-sm text-ink-3 py-16 text-center">
+          No rates or forecasts for this period yet. They appear after the first daily update.
+        </p>
+      )}
     </section>
   );
 }
@@ -214,13 +298,13 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
         </p>
       </div>
       <div className="max-h-[560px] overflow-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm min-w-[360px]">
           <thead className="sticky top-0 bg-surface text-xs text-ink-3 text-left">
             <tr className="border-b border-line">
               <th className="font-medium px-4 sm:px-6 py-2">Date</th>
               <th className="font-medium px-2 py-2 text-right">Actual</th>
               <th className="font-medium px-2 py-2 text-right">Predicted</th>
-              <th className="font-medium px-2 py-2 text-right hidden sm:table-cell">Miss</th>
+              <th className="font-medium px-2 py-2 text-right">Miss</th>
               <th className="font-medium px-4 sm:px-6 py-2 text-right">Last month</th>
             </tr>
           </thead>
@@ -248,7 +332,7 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
                 <td className={`num px-2 py-2 text-right ${m.kind === "future" ? "font-medium" : "text-ink-2"}`}>
                   {fmt(m.predicted, d)}
                 </td>
-                <td className="num px-2 py-2 text-right hidden sm:table-cell">
+                <td className="num px-2 py-2 text-right">
                   {m.delta !== null ? (
                     <span title={`${pct(m.pctError!, 3)} · forecast too ${m.delta > 0 ? "high" : m.delta < 0 ? "low" : "exact"}`} className="text-ink-2">
                       {m.delta > 0 ? "+" : ""}
@@ -258,7 +342,15 @@ function MonthTable({ c }: { c: CurrencyDashboard }) {
                     <span className="text-ink-3">—</span>
                   )}
                 </td>
-                <td className="num px-4 sm:px-6 py-2 text-right text-ink-2">{fmt(m.lastMonth, d)}</td>
+                <td className="num px-4 sm:px-6 py-2 text-right text-ink-2">
+                  {fmt(m.lastMonth, d)}
+                  {m.lastMonth !== null && m.lastMonthDate.slice(8) !== m.date.slice(8) && (
+                    <span className="text-ink-3 text-xs" title="Last month had no such day: its last day is shown">
+                      {" "}
+                      ({shortDate(m.lastMonthDate)})
+                    </span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -358,7 +450,7 @@ function MarketCard({
                   ? ""
                   : f.unit === "pp"
                     ? `${f.change30d >= 0 ? "+" : ""}${f.change30d.toFixed(2)} pp 30d`
-                    : `${pct(f.change30d)}${f.label.includes("year earlier") ? "" : " 30d"}`}
+                    : `${pct(f.change30d)}${f.yoy ? "" : " 30d"}`}
               </span>
             </dd>
           </div>
@@ -508,6 +600,49 @@ function EventsCard({ c, events }: { c: CurrencyDashboard; events: Dashboard["ev
   );
 }
 
+/** What moved the forecast for one date between the last two runs: the new rate, or the models. */
+function MovedCard({ c }: { c: CurrencyDashboard }) {
+  const m = c.moved;
+  if (!m) return null;
+  const d = c.decimals;
+  const p = (x: number) => pct(x, 3);
+  const quiet = Math.abs(m.modelPct) < 0.0005;
+  return (
+    <section className="card p-4 sm:p-5 min-w-0" aria-label="What moved the forecast">
+      <h2 className="text-lg font-semibold">What moved the forecast</h2>
+      <p className="text-xs text-ink-3 mt-0.5 mb-3">
+        The forecast for {shortDate(m.target)} made on {shortDate(m.madeOn)}, against the one made on {shortDate(m.prevMadeOn)}.
+      </p>
+      <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+        <div>
+          <dt className="text-xs text-ink-3">Forecast</dt>
+          <dd className="num font-medium">
+            {fmt(m.prevPredicted, d)} → {fmt(m.predicted, d)}
+          </dd>
+          <dd className="num text-xs text-ink-3">{p(m.totalPct)}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-ink-3">From the new rate</dt>
+          <dd className="num font-medium">{p(m.ratePct)}</dd>
+          <dd className="text-xs text-ink-3">the rate it starts from</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-ink-3">From the models</dt>
+          <dd className="num font-medium">{quiet ? "none" : p(m.modelPct)}</dd>
+          <dd className="text-xs text-ink-3">{quiet ? "random walk: forecast = latest rate" : "weights, trends, bias"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-ink-3">80% range, ±</dt>
+          <dd className="num font-medium">
+            {pct(m.prevWidthPct, 2, false)} → {pct(m.widthPct, 2, false)}
+          </dd>
+          <dd className="text-xs text-ink-3">half-width</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
 const PAIR_ONLY: Record<string, readonly string[]> = { lanka: ["LKR", "USDLKR"], cbsl_gap: ["LKR", "USDLKR"], cross: ["LKR"] };
 
 function LearningSection({ c }: { c: CurrencyDashboard }) {
@@ -532,7 +667,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
       <div className="grid lg:grid-cols-2 gap-6 [&>*]:min-w-0">
         <div>
           <h3 className="text-sm font-semibold mb-2">Accuracy, last 60 days</h3>
-          <div className="overflow-x-auto"><table className="w-full text-sm min-w-[340px]">
+          <div className="overflow-x-auto"><table className="w-full text-sm min-w-[400px]">
             <thead className="text-xs text-ink-3 text-left">
               <tr className="border-b border-line">
                 <th className="font-medium py-1.5">Horizon</th>
@@ -540,7 +675,12 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                 <th className="font-medium py-1.5 text-right" title="Random walk = 'tomorrow equals today'">
                   Random walk
                 </th>
-                <th className="font-medium py-1.5 text-right">Within 0.25%</th>
+                <th className="font-medium py-1.5 text-right" title="Share of forecasts within 0.25% of the actual rate">
+                  Within 0.25%
+                </th>
+                <th className="font-medium py-1.5 text-right" title="Same, for the random walk on the same days">
+                  RW within
+                </th>
                 <th className="font-medium py-1.5 text-right">n</th>
               </tr>
             </thead>
@@ -551,6 +691,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
                   <td className="num py-1.5 text-right font-medium">{pct(a.ensembleMae, 3, false)}</td>
                   <td className="num py-1.5 text-right text-ink-2">{pct(a.naiveMae, 3, false)}</td>
                   <td className="num py-1.5 text-right">{a.within == null ? "—" : `${a.within.toFixed(0)}%`}</td>
+                  <td className="num py-1.5 text-right text-ink-2">{a.naiveWithin == null ? "—" : `${a.naiveWithin.toFixed(0)}%`}</td>
                   <td className="num py-1.5 text-right text-ink-3">{a.n}</td>
                 </tr>
               ))}
@@ -559,7 +700,7 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
         </div>
 
         <div>
-          <h3 className="text-sm font-semibold mb-2">Recent next-day forecasts vs actual</h3>
+          <h3 className="text-sm font-semibold mb-2">Recent next-day forecasts vs actual (trading days)</h3>
           <table className="w-full text-sm">
             <thead className="text-xs text-ink-3 text-left">
               <tr className="border-b border-line">
@@ -636,7 +777,9 @@ function LearningSection({ c }: { c: CurrencyDashboard }) {
           </div>
           <p className="text-xs text-ink-3 mt-2">
             Bar = share of the final forecast; hover for the model&apos;s average miss. &ldquo;Last months&apos; same-day path&rdquo;
-            replays how the rate moved from this date in each of the previous three months.
+            replays how the rate moved from this date in each of the previous three months. Bias correction: a learned
+            shift for consistent over- or under-forecasting; it is only switched on where it beat the uncorrected
+            forecast by the same test, and never beyond 7 days.
           </p>
         </div>
       )}
@@ -695,7 +838,7 @@ function PerformanceCard({
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <div className="rounded-xl bg-surface-2 p-3 min-w-0">
           <div className="text-xs text-ink-3 uppercase tracking-wide">
-            Yesterday{y ? ` · ${shortDate(y.date)}` : ""}
+            Latest scored day{y ? ` · ${shortDate(y.date)}` : ""}
           </div>
           {y ? (
             <dl className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-sm">
@@ -715,7 +858,7 @@ function PerformanceCard({
               </dd>
             </dl>
           ) : (
-            <p className="text-sm text-ink-3 mt-2">No scored next-day forecast yet.</p>
+            <p className="text-sm text-ink-3 mt-2">No scored next-day forecast for a trading day yet.</p>
           )}
         </div>
         <div className="rounded-xl bg-surface-2 p-3 min-w-0">
@@ -746,14 +889,13 @@ function PerformanceCard({
           <div>
             <h3 className="text-sm font-semibold mb-2">Next-day forecasts, rolling</h3>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[320px]">
+              <table className="w-full text-sm min-w-[420px]">
                 <thead className="text-xs text-ink-3 text-left">
                   <tr className="border-b border-line">
                     <th className="font-medium py-1.5">Window</th>
-                    <th className="font-medium py-1.5 text-right" title="Mean absolute % error">MAPE</th>
-                    <th className="font-medium py-1.5 text-right" title="Root mean squared % error">RMSE</th>
-                    <th className="font-medium py-1.5 text-right" title="Mean absolute error in rate units">MAE</th>
-                    <th className="font-medium py-1.5 text-right" title="'Tomorrow = today', same days">Random walk</th>
+                    <th className="font-medium py-1.5 text-right" title="Mean absolute % error · random walk on the same days">MAPE · RW</th>
+                    <th className="font-medium py-1.5 text-right" title="Root mean squared % error · random walk">RMSE · RW</th>
+                    <th className="font-medium py-1.5 text-right" title="Mean absolute error in rate units · random walk">MAE · RW</th>
                     <th className="font-medium py-1.5 text-right">n</th>
                   </tr>
                 </thead>
@@ -761,10 +903,18 @@ function PerformanceCard({
                   {p.windows.map((w) => (
                     <tr key={w.days} className="border-b border-line last:border-0">
                       <td className="py-1.5">Last {w.days} days</td>
-                      <td className="num py-1.5 text-right font-medium">{pct(w.mape, 3, false)}</td>
-                      <td className="num py-1.5 text-right">{pct(w.rmse, 3, false)}</td>
-                      <td className="num py-1.5 text-right">{fmt(w.mae, d)}</td>
-                      <td className="num py-1.5 text-right text-ink-2">{pct(w.naiveMape, 3, false)}</td>
+                      <td className="num py-1.5 text-right">
+                        <span className="font-medium">{pct(w.mape, 3, false)}</span>
+                        <span className="text-ink-3 text-xs"> · {pct(w.naiveMape, 3, false)}</span>
+                      </td>
+                      <td className="num py-1.5 text-right">
+                        {pct(w.rmse, 3, false)}
+                        <span className="text-ink-3 text-xs"> · {pct(w.naiveRmse, 3, false)}</span>
+                      </td>
+                      <td className="num py-1.5 text-right">
+                        {fmt(w.mae, d)}
+                        <span className="text-ink-3 text-xs"> · {fmt(w.naiveMae, d)}</span>
+                      </td>
                       <td className="num py-1.5 text-right text-ink-3">{w.n}</td>
                     </tr>
                   ))}
@@ -800,6 +950,10 @@ function PerformanceCard({
                 </tbody>
               </table>
             </div>
+            <p className="text-xs text-ink-3 mt-1.5">
+              The 80% range is where the forecast expects the rate 4 times in 5. It is right when about 80% of actual
+              rates land inside: much more means it is too wide, much less too narrow.
+            </p>
           </div>
         </div>
       )}
@@ -807,7 +961,9 @@ function PerformanceCard({
       {p && (
         <dl className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6 text-sm">
           <div>
-            <dt className="text-xs text-ink-3">Systematic bias (next day, 90d)</dt>
+            <dt className="text-xs text-ink-3" title="Does the next-day forecast keep landing on the same side? Reported only if the mean is ~2 standard errors from zero.">
+              Systematic bias (next day, 90d)
+            </dt>
             <dd className="font-medium">
               {p.bias.verdict === "none" ? "none detected" : p.bias.verdict === "not enough data" ? "not enough data" : `consistently ${p.bias.verdict}`}
             </dd>
@@ -854,6 +1010,7 @@ function PerformanceCard({
           <>
             {" "}· hardest pair (30-day next-day error): <span className="text-ink-2">{hardest.label}</span>{" "}
             {pct(hardest.mape, 3, false)}
+            {hardest.naiveMape != null && <> (random walk {pct(hardest.naiveMape, 3, false)})</>}
           </>
         )}
       </p>
@@ -1010,7 +1167,7 @@ function VersionsCard({ data }: { data: Dashboard }) {
       {data.learningLog.length === 0 ? (
         <p className="text-xs text-ink-3">
           No model or bias correction has been switched on or off since logging began. The forecast stays the random walk
-          until a candidate beats it with a paired t-test (t &lt; −2.6) on at least 30 days.
+          until a candidate beats it with a paired t-test (t &lt; −2.6, stricter for small samples) on at least 30 days.
         </p>
       ) : (
         <ul className="text-xs space-y-1">

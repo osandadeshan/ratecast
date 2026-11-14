@@ -8,7 +8,7 @@
   --border: #e3e2dd;
   --text: #0b0b0b;
   --text-2: #52514e;
-  --text-3: #7a7974;
+  --text-3: #6b6a65; /* 5.3:1 on --surface, 4.7:1 on --surface-2 (was #7a7974, 4.1:1) */
   --series-1: #2a78d6; /* actual */
   --series-2: #eb6834; /* predicted */
   --series-3: #1baf7a; /* last month */
@@ -29,13 +29,14 @@
     --text: #f0efec;
     --text-2: #c3c2b7;
     --text-3: #8f8e86;
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --band: rgba(217, 89, 38, 0.2);
+    --series-1: #4b93ea;
+    --series-2: #ec7444; /* brighter on dark: 5.9:1 on --surface */
+    --series-3: #2fbf8a;
+    --band: rgba(236, 116, 68, 0.2);
     --grid: #2a2a28;
     --good-text: #4cc44c;
-    --accent: #3987e5;
+    --critical: #f07070; /* light #d03b3b is only 3.6:1 on dark surfaces */
+    --accent: #4b93ea;
   }
 }
 :root[data-theme="dark"] {
@@ -47,13 +48,14 @@
   --text: #f0efec;
   --text-2: #c3c2b7;
   --text-3: #8f8e86;
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --band: rgba(217, 89, 38, 0.2);
+  --series-1: #4b93ea;
+  --series-2: #ec7444;
+  --series-3: #2fbf8a;
+  --band: rgba(236, 116, 68, 0.2);
   --grid: #2a2a28;
   --good-text: #4cc44c;
-  --accent: #3987e5;
+  --critical: #f07070;
+  --accent: #4b93ea;
 }
 
 @theme inline {

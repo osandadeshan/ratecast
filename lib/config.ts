@@ -147,3 +147,22 @@ export const SRI_LANKA_META = [
   { series: "lk_tourism", label: "Tourism earnings (USD mn / month)", transform: "log" },
   { series: "lk_ccpi_yoy", label: "Colombo CPI inflation (YoY %)", transform: "diff" },
 ] as const;
+
+/** UI labels of the stored model names (client-safe; re-exported by lib/predict/models.ts). */
+export const MODEL_LABELS: Record<string, string> = {
+  naive: "Random walk",
+  drift: "30-day drift",
+  holt: "Holt trend",
+  monthly_pattern: "Last months' same-day path",
+  mean_reversion: "Mean reversion",
+  market: "USD-strength (ECB basket)",
+  macro: "US yields, oil, dollar index (lagged)",
+  arima: "AR on daily returns (ARIMA p,1,0)",
+  news: "Post-announcement drift",
+  lanka: "Sri Lanka data (CBSL)",
+  cross: "Two-part: SGD→USD × USD→LKR",
+  cbsl_gap: "Gap to CBSL official rate",
+  blend: "Weighted blend (raw)",
+  blend_bc: "Blend + bias correction",
+  ensemble: "Final (bias-corrected)",
+};

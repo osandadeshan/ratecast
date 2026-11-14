@@ -43,11 +43,26 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
   }));
 
   const values = data.flatMap((p) => [p.actual, p.predicted, p.lastMonth, ...(p.band ?? [])]).filter(
-    (v): v is number => v !== null,
+    (v): v is number => v !== null && Number.isFinite(v),
   );
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const pad = (max - min) * 0.12 || max * 0.001;
+  // No values: a fixed domain (the caller shows an empty state instead, this only guards against NaN).
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 1;
+  const pad = (max - min) * 0.12 || max * 0.001 || 1;
+
+  // Text summary for screen readers (the SVG itself is hidden from them).
+  const last = [...month].reverse().find((d) => d.actual !== null);
+  const end = month[month.length - 1];
+  const summary = [
+    `Rate chart, ${shortDate(month[0].date)} to ${shortDate(end.date)}.`,
+    last ? `Latest actual ${fmt(last.actual, decimals)} ${target} on ${shortDate(last.date)}.` : "",
+    end.predicted !== null
+      ? `Forecast for ${shortDate(end.date)}: ${fmt(end.predicted, decimals)}` +
+        (end.lower80 !== null ? `, 80% range ${fmt(end.lower80, decimals)} to ${fmt(end.upper80, decimals)}.` : ".")
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div>
@@ -61,12 +76,13 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
         <LegendItem color="var(--series-3)" label="Same day last month" thin />
         {month.some((d) => d.events.length > 0) && <LegendItem color="var(--text-3)" label="Policy event" dotted />}
       </div>
-      <div className="h-[300px] sm:h-[340px] -ml-2">
+      <div className="h-[300px] sm:h-[340px] -ml-2" role="img" aria-label={summary}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="var(--grid)" vertical={false} />
             <XAxis
-              dataKey="day"
+              dataKey="date"
+              tickFormatter={(v: string) => String(Number(v.slice(8)))}
               tickLine={false}
               axisLine={{ stroke: "var(--border)" }}
               tick={{ fill: "var(--text-3)", fontSize: 11 }}
@@ -149,7 +165,7 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
               .map((d) => (
                 <ReferenceLine
                   key={d.date}
-                  x={Number(d.date.slice(8))}
+                  x={d.date}
                   stroke="var(--text-3)"
                   strokeDasharray="1 3"
                   strokeOpacity={0.8}
@@ -157,7 +173,7 @@ export default function MonthChart({ month, today, decimals, target }: Props) {
                 />
               ))}
             <ReferenceLine
-              x={Number(today.slice(8))}
+              x={today}
               stroke="var(--text-3)"
               strokeDasharray="2 3"
               label={{ value: "Today", position: "insideTopRight", fill: "var(--text-3)", fontSize: 11 }}

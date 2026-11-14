@@ -60,7 +60,7 @@ must earn weight through the existing learner and the backtest.
 | 2 | `macro` model: lagged moves in the US 2y yield (Treasury) and Brent (FRED) → ridge regression on pair returns, plus automatic **shadow mode** for unproven models | **done 2026-11-11, in shadow** (failed the backtest; weight 0 until it beats the random walk) |
 | 3 | Decision outcomes (cut/hold/hike) read from each FOMC statement and CBSL review PDF; `news` model = random walk + learned post-announcement drift for 5 days after E+1, in shadow mode | **done 2026-11-11, in shadow** (ensemble unchanged) |
 | 4 | More sources and candidates: BLS US CPI / jobs days (display-only events), Fed broad dollar index as a `macro` input for SGD→USD, gated `arima` candidate, recency-weighted 80% band, Colombo CPI for context | **done 2026-11-14** (see Backtest results) |
-| 5 | UI panel "what moved the forecast today" | not started |
+| 5 | UI panel "what moved the forecast" (7-day forecast vs the previous run: new rate vs models, band width) | **done 2026-11-15** |
 
 Polymarket/Kalshi Fed odds were deferred: each contract covers one meeting and lives a few months, so a daily
 series means stitching rolling contracts with short histories, and the US 2-year yield already prices the
@@ -295,6 +295,15 @@ E+1, CBSL reviews without a predecessor from E unless Jan–Apr).
 - Tried and not adopted in this round: adaptive conformal updating (γ = 0.02: coverage 78–82% but wider, worse
   interval score), EWMA volatility scaling, per-weekday q80, signed (asymmetric) quantiles.
 
+**2026-11-15 · UI and UX audit fixes (no model change, `MODEL_VERSION` unchanged).** Page data is cached
+(`"use cache"`, 5 min) and cleared after each sync. The Today card no longer shows a stale cached quote as
+"today". Last month's date says when it was clamped to the month's last day. Tomorrow shows the random walk
+beside the forecast. Month end is neutral unless the outlook is clear. Every error figure has the random walk's
+next to it (MAPE/RMSE/MAE, "RW within"). The chart shows ±10 days around today in a month's first or last week.
+New "What moved the forecast" card. ARIA tabs with the pair in the URL hash. Auto/light/dark toggle. Dark
+series colours and the light `--text-3` were raised to ≥ 4.5:1 contrast. The Miss column is visible on mobile.
+Deltas and the latest scored day skip non-trading days.
+
 ## Known limitations / risks
 - **Wise may block Vercel IPs** (untested at the time of writing). The live quote and sync would fail; check
   with the `verify-deploy` skill.
@@ -355,7 +364,6 @@ E+1, CBSL reviews without a predecessor from E unless Jan–Apr).
 - CBSL weekly reserves and net USD purchases: only in the Weekly Economic Indicators PDF, which the `node:zlib`
   reader can't extract yet. (CBSL daily fixings, policy rate, T-bill, remittances, tourism and Colombo CPI are
   already ingested.)
-- "What moved the forecast today" (from the policy-events plan).
 - Colombo CPI as a `lanka` input once ~2 years of `lk_ccpi_yoy` are stored. Polymarket/Kalshi Fed odds if `macro`
   ever gets promoted. Headline sentiment (GDELT) if it becomes reachable and a longer history is available.
 - Email/notification when tomorrow's forecast moves > x% (would need a free mail provider).

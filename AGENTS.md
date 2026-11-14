@@ -31,7 +31,7 @@ results, limitations).
 | Run one sync (ingest → evaluate → learn → forecast) | `npm run sync` (reads `.env.local`) |
 | Dev server | `npm run dev` |
 | Typecheck / lint / build | `npx tsc --noEmit` · `npm run lint` · `npm run build` |
-| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 94 tests) |
+| Unit tests | `npm test` (node:test via tsx, `tests/*.test.ts`, 95 tests) |
 | Backtest current code (read-only) | `npm run backtest` (~30 s; same code path as the sync) |
 | Full 365-day replay in one run | `REPLAY_BUDGET_MS=100000000 npm run sync` |
 | Inspect DB | `docker exec ratecast-pg psql -U postgres -d rates` |
@@ -44,11 +44,11 @@ or `GET /api/dashboard`. For model changes, run the backtest (`.claude/skills/ba
 ## Layout
 ```
 app/page.tsx                  Server page: Suspense + connection(); after() triggers sync if today's run is missing
-app/components/               Client UI (DashboardView = whole page, MonthChart = Recharts)
+app/components/               Client UI (DashboardView = whole page, MonthChart = Recharts, ThemeToggle)
 app/api/cron/sync/route.ts    Daily Vercel Cron target (Bearer CRON_SECRET)
 app/api/dashboard/route.ts    Read-only JSON of everything on the page
 lib/config.ts                 Pairs, horizons, windows, budgets, timezone, MODEL_VERSION, MACRO_FACTORS, LANKA_FACTORS,
-                              SRI_LANKA_META (single source of truth)
+                              SRI_LANKA_META, MODEL_LABELS (single source of truth)
 lib/dates.ts                  YYYY-MM-DD string date math (UTC-based)
 lib/db.ts                     postgres.js client + idempotent CREATE TABLE IF NOT EXISTS schema
 lib/sources/                  Wise (history, comparisons), market (ECB basket, cross-checks),

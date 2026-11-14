@@ -28,8 +28,10 @@ export interface Metrics {
   rmse: number | null;
   /** Mean absolute error in rate units. */
   mae: number | null;
-  /** Same target dates, the random walk's MAPE. */
+  /** Same target dates, the random walk's MAPE, RMSE and MAE (rate units). */
   naiveMape: number | null;
+  naiveRmse: number | null;
+  naiveMae: number | null;
 }
 
 export interface WindowMetrics extends Metrics {
@@ -74,7 +76,7 @@ const MIN_N = 10;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 function metrics(rows: ScoredRow[], naiveByKey: Map<string, ScoredRow>): Metrics {
-  if (!rows.length) return { n: 0, mape: null, rmse: null, mae: null, naiveMape: null };
+  if (!rows.length) return { n: 0, mape: null, rmse: null, mae: null, naiveMape: null, naiveRmse: null, naiveMae: null };
   const nv = rows.map((r) => naiveByKey.get(key(r))).filter((x): x is ScoredRow => !!x);
   return {
     n: rows.length,
@@ -82,6 +84,8 @@ function metrics(rows: ScoredRow[], naiveByKey: Map<string, ScoredRow>): Metrics
     rmse: Math.sqrt(mean(rows.map((r) => r.pct * r.pct))!),
     mae: mean(rows.map((r) => Math.abs(r.predicted - r.actual))),
     naiveMape: nv.length ? mean(nv.map((r) => Math.abs(r.pct))) : null,
+    naiveRmse: nv.length ? Math.sqrt(mean(nv.map((r) => r.pct * r.pct))!) : null,
+    naiveMae: nv.length ? mean(nv.map((r) => Math.abs(r.predicted - r.actual))) : null,
   };
 }
 

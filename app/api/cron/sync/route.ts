@@ -1,5 +1,7 @@
+import { revalidateTag } from "next/cache";
 import { connection } from "next/server";
 import { CRON_BACKTEST_BUDGET_MS } from "@/lib/config";
+import { DASHBOARD_TAG } from "@/lib/dashboard";
 import { runSync } from "@/lib/sync";
 
 export const maxDuration = 300;
@@ -33,5 +35,7 @@ export async function GET(request: Request) {
   }
   // A page-triggered run may hold the lock; wait for it (≤ 70 s) rather than skip the day's cron.
   const result = await runSync({ backtestBudgetMs: CRON_BACKTEST_BUDGET_MS, waitForLockMs: 70_000 });
+  // The page data is cached (lib/dashboard.ts); the next visit after a sync reads the new forecast.
+  if (result.status !== "skipped") revalidateTag(DASHBOARD_TAG, { expire: 0 });
   return Response.json(result, { status: result.status === "error" ? 500 : 200 });
 }

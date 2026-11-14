@@ -390,20 +390,5 @@ export const MODEL_NAMES = Object.keys(MODELS);
  */
 export const SHADOW_MODELS: readonly string[] = ["macro", "news", "lanka", "cross", "cbsl_gap"];
 
-export const MODEL_LABELS: Record<string, string> = {
-  naive: "Random walk",
-  drift: "30-day drift",
-  holt: "Holt trend",
-  monthly_pattern: "Last months' same-day path",
-  mean_reversion: "Mean reversion",
-  market: "USD-strength (ECB basket)",
-  macro: "US yields, oil, dollar index (lagged)",
-  arima: "AR on daily returns (ARIMA p,1,0)",
-  news: "Post-announcement drift",
-  lanka: "Sri Lanka data (CBSL)",
-  cross: "Two-part: SGD→USD × USD→LKR",
-  cbsl_gap: "Gap to CBSL official rate",
-  blend: "Weighted blend (raw)",
-  blend_bc: "Blend + bias correction",
-  ensemble: "Final (bias-corrected)",
-};
+/** Labels live in config so client components can use them without importing the models. */
+export { MODEL_LABELS } from "../config";

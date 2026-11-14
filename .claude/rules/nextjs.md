@@ -12,6 +12,10 @@ paths:
   Otherwise the build prerenders it. `/api/cron/sync` once ran a real sync during `next build` this way.
 - Cache external fetches with a `"use cache"` function + `cacheLife({...})` (example: `cachedLiveQuote` in
   `lib/dashboard.ts`). Wrap the cached call in try/catch outside the cached function so failures aren't cached.
+- The whole dashboard payload is cached the same way (`cachedDashboard`, `cacheTag(DASHBOARD_TAG)`). Every
+  path that runs a sync must call `revalidateTag(DASHBOARD_TAG, { expire: 0 })` afterwards when the run wasn't
+  skipped (cron route; `after()` in `app/page.tsx`, inside try/catch). Cached functions take `today` as an
+  argument: never read the clock inside one.
 - Background work after the response goes through `after()` from `next/server`. It must not use
   `cookies()`/`headers()` when called from a Server Component.
 - `maxDuration`: the page uses 60 and the cron route uses 300 (the Vercel Hobby fluid-compute max). Don't raise them.

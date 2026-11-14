@@ -302,8 +302,26 @@ Before 2026-11-14 the first flagged provider in the list won, which could show R
   80% range. `.hardest` = pair with the highest 30-day next-day MAPE (n ≥ 10).
 - Data sources card: `.freshness` (first/latest date per series vs a max age from `SERIES_CATALOG`),
   `source_health`, and the static `NOT_INTEGRATED` list.
-- The live quote is fetched per request through `"use cache"` (revalidate 5 min). It falls back to the
-  latest `live_quotes` row.
+- Caching: `getDashboard()` calls `cachedDashboard(today)`, a `"use cache"` function (`cacheLife` stale 60 s,
+  revalidate 5 min, expire 1 h) tagged `DASHBOARD_TAG` (`"dashboard"`). After every sync that wasn't skipped,
+  the cron route and the page's `after()` call `revalidateTag(DASHBOARD_TAG, { expire: 0 })`, so new
+  forecasts show at once (the page call is wrapped in try/catch). Without a DB it builds the payload directly.
+  The live quote has its own cache (`cachedLiveQuote`, tag `live-quote`, 5 min) and falls back to the latest
+  `live_quotes` row. `liveIsToday` is true only when that quote is dated today (SGT). Otherwise the Today card
+  says "Latest · <date>" and leaves out the change figures, and the outlook doesn't compare against it.
+  `liveTime` and `lastSync.atLabel` are formatted in SGT on the server.
+- Chart window (`chartWindow`, `.window` = `{start, end, calendarEnd}`): the calendar month, except that within
+  7 days of the month's start or end it shows 10 days on that side of today (label e.g. "Nov 25 – Dec 15, 2026").
+  The month-end card always uses `calendarEnd`.
+- Same day last month: `addMonths` clamps (Mar 31 → Feb 28). `lastMonthSameDay.clamped` and
+  `MonthDay.lastMonthDate` tell the UI which day was used.
+- Recent deltas: the last 14 scored trading days (non-trading weekdays dropped). The latest scored day also
+  skips non-trading days. `.model.madeToday` is false before today's sync; the page then shows a notice.
+- What moved the forecast (`.moved`, `movedView`): the two latest `ensemble` forecasts for target
+  max(made_on) + 7. The change splits into the new starting rate vs the models (weights, trends, bias), plus the
+  80% half-width before and after.
+- Accuracy rows carry `naiveWithin` (random walk's % within 0.25%); Performance `Metrics` carry `naiveRmse`
+  and `naiveMae` next to `naiveMape`.
 - Policy events: one query for events with `known_since ≤ today` within −45/+75 days (`.events.upcoming`,
   `.events.recent`, plus short labels on each `MonthDay.events`) and one for `source_health`
   (`.events.health`). Shared across currencies; the per-currency effect comes from `stats.events`.
@@ -323,5 +341,5 @@ Before 2026-11-14 the first flagged provider in the list won, which could show R
 | route | purpose | auth |
 |---|---|---|
 | `/` | dashboard (PPR shell + streamed data; `maxDuration` 60) | none |
-| `/api/dashboard` | JSON of the same data, CDN-cached 2 min | none |
+| `/api/dashboard` | JSON of the same data (`getDashboard()`, so the same `"use cache"` entry), CDN-cached 2 min | none |
 | `/api/cron/sync` | run a sync (`maxDuration` 300, backtest deadline 240 s) | `Authorization: Bearer $CRON_SECRET`. Fails closed: on a deployment without `CRON_SECRET` it returns 500; only local `next dev` runs without a secret |
